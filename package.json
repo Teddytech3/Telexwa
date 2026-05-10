@@ -9,10 +9,10 @@
     "start:high": "node --max-old-space-size=1024 index.js"
   },
   "engines": {
-    "node": "22.x"
+    "node": ">=22.0.0"
   },
   "dependencies": {
-    "@trashcore/baileys": "file:./trashcore/baileys",
+    "@trashcore/baileys": "latest",
     "chalk": "^4.1.2",
     "crypto": "^1.0.1",
     "axios": "^1.7.9",
@@ -35,7 +35,9 @@
     "similarity": "^1.2.1",
     "didyoumean": "^1.2.2",
     "node-cache": "^5.1.2",
-    "node-telegram-bot-api": "^0.66.0"
+    "node-telegram-bot-api": "^0.66.0",
+    "express": "^4.19.2",
+    "cors": "^2.8.5"
   },
   "description": "BaseBot V4 + Telegram multi-session pairing"
 }
