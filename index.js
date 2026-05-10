@@ -21,8 +21,7 @@ const {
 
 const TelegramBot = require('node-telegram-bot-api');
 
-const { initDatabase, getSetting, setSetting, upsertTgUser, getTgUsers, getTgUserCount } = require('./database');
-const { logMessage } = require('./database/logger');
+const { initDatabase, getSetting, setSetting, upsertTgUser, getTgUsers, getTgUserCount, logMessage } = require('./database');
 const config = require('./config');
 
 global.botStartTime = Date.now();
@@ -654,7 +653,7 @@ bot.onText(/\/delsession (\d+)/, async (msg, match) => {
 bot.onText(/\/status/, (msg) => {
   const users = connectedUsers[msg.chat.id] || [];
   const text = users.length
-   ? users.map(u => `📱 ${u.phoneNumber}`).join('\n')
+  ? users.map(u => `📱 ${u.phoneNumber}`).join('\n')
     : 'No sessions connected.';
   bot.sendMessage(msg.chat.id, `📊 *Active Sessions*\n\n${text}`, { parse_mode: 'Markdown' });
 });
@@ -664,17 +663,23 @@ bot.onText(/\/runtime/, (msg) => {
   bot.sendMessage(msg.chat.id, `⏱️ Bot Runtime: ${uptime}`);
 });
 
-initDatabase().then(() => {
-  dbReady = true;
-  loadConnectedUsers();
-  loadPhoneToTgChat();
-  console.log(chalk.green('✅ Database ready.'));
-  for (const [chatId, sessions] of Object.entries(connectedUsers)) {
-    for (const session of sessions) {
-      startWhatsAppBot(session.phoneNumber, chatId).catch(console.error);
+// Fixed DB init - returns Promise now
+initDatabase()
+.then(() => {
+    dbReady = true;
+    loadConnectedUsers();
+    loadPhoneToTgChat();
+    console.log(chalk.green('✅ Database ready.'));
+    for (const [chatId, sessions] of Object.entries(connectedUsers)) {
+      for (const session of sessions) {
+        startWhatsAppBot(session.phoneNumber, chatId).catch(console.error);
+      }
     }
-  }
-});
+  })
+.catch(err => {
+    console.error('❌ DB init failed:', err);
+    process.exit(1);
+  });
 
 process.on('unhandledRejection', err => console.error('Unhandled Rejection:', err));
 process.on('uncaughtException', err => console.error('Uncaught Exception:', err));
