@@ -7,7 +7,6 @@ const fs = require('fs');
 const path = require('path');
 const pino = require('pino');
 const chalk = require('chalk');
-const readline = require('readline');
 const NodeCache = require('node-cache');
 const express = require('express');
 const cors = require('cors');
@@ -17,8 +16,7 @@ const {
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
-  DisconnectReason,
-  jidNormalizedUser
+  DisconnectReason
 } = require('@trashcore/baileys');
 
 const TelegramBot = require('node-telegram-bot-api');
@@ -305,7 +303,79 @@ async function handleGroupParticipants(trashcore, update) {
   try {
     const { id, participants, action } = update;
     invalidateGroupCache(id);
-    //... rest of your group participant logic stays the same...
+
+    if (action === 'promote') {
+      const apSetting = getScopedSetting(trashcore, `antipromote_${id}`, null) || getSetting(`antipromote_${id}`, { enabled: false });
+      if (apSetting?.enabled) {
+        for (const jid of participants) {
+          try {
+            await trashcore.groupParticipantsUpdate(id, [jid], 'demote');
+            if (apSetting.mode === 'kick') await trashcore.groupParticipantsUpdate(id, [jid], 'remove');
+            trashcore.sendMessage(id, {
+              text: `⚠️ @${jid.split('@')[0]} was promoted without authorization and has been reverted.`,
+              mentions: [jid]
+            }).catch(() => {});
+          } catch {}
+        }
+      }
+    }
+
+    if (action === 'demote') {
+      const adSetting = getScopedSetting(trashcore, `antidemote_${id}`, null) || getSetting(`antidemote_${id}`, { enabled: false });
+      if (adSetting?.enabled) {
+        for (const jid of participants) {
+          try {
+            await trashcore.groupParticipantsUpdate(id, [jid], 'promote');
+            if (adSetting.mode === 'kick') await trashcore.groupParticipantsUpdate(id, [jid], 'remove');
+            trashcore.sendMessage(id, {
+              text: `⚠️ @${jid.split('@')[0]} was demoted without authorization and has been reverted.`,
+              mentions: [jid]
+            }).catch(() => {});
+          } catch {}
+        }
+      }
+    }
+
+    const isWelcomeOn = getScopedSetting(trashcore, `welcome_${id}`, false);
+    const isGoodbyeOn = getScopedSetting(trashcore, `goodbye_${id}`, false);
+    if (action === 'add' &&!isWelcomeOn) return;
+    if (action === 'remove' &&!isGoodbyeOn) return;
+    const meta = await getGroupMeta(trashcore, id);
+    if (!meta) return;
+    const groupName = meta.subject || 'this group';
+    const memberCount = meta.participants?.length || 0;
+    const axios = require('axios');
+    for (const jid of participants) {
+      const num = jid.split('@')[0];
+      let ppUser = null;
+      try {
+        const ppUrl = await trashcore.profilePictureUrl(jid, 'image');
+        const res = await axios.get(ppUrl, { responseType: 'arraybuffer', timeout: 8000 });
+        ppUser = Buffer.from(res.data);
+      } catch {
+        try {
+          const res = await axios.get('https://i.ibb.co/Kj7J3Rg/default-avatar.jpg', { responseType: 'arraybuffer', timeout: 8000 });
+          ppUser = Buffer.from(res.data);
+        } catch {}
+      }
+      const ppUrl = await trashcore.profilePictureUrl(jid, 'image').catch(() => '');
+      if (action === 'add' && isWelcomeOn) {
+        await trashcore.sendMessage(id, {
+          image: ppUser || { url: 'https://i.ibb.co/Kj7J3Rg/default-avatar.jpg' },
+          caption: `╔══════════╗\n║ 👋 *WELCOME!* ║\n╚══════════╝\n\n@${num} just joined the group!\n\n• *Group* : ${groupName}\n• *Members* : ${memberCount}\n\n_Welcome to the family! 🎉_`,
+          mentions: [jid],
+          contextInfo: { externalAdReply: { title: `☘️ Welcome, @${num}!`, body: groupName, thumbnailUrl: ppUrl, sourceUrl: 'https://github.com/TEDDY-XMD', mediaType: 1, renderLargerThumbnail: true } }
+        });
+      }
+      if (action === 'remove' && isGoodbyeOn) {
+        await trashcore.sendMessage(id, {
+          image: ppUser || { url: 'https://i.ibb.co/Kj7J3Rg/default-avatar.jpg' },
+          caption: `╔══════════╗\n║ 👋 *GOODBYE!* ║\n╚══════════╝\n\n@${num} has left the group.\n\n• *Group* : ${groupName}\n• *Members* : ${memberCount}\n\n_Thanks for being with us. We'll miss you! 💙_`,
+          mentions: [jid],
+          contextInfo: { externalAdReply: { title: `☘️ Goodbye, @${num}!`, body: groupName, thumbnailUrl: ppUrl, sourceUrl: 'https://github.com/TEDDY-XMD', mediaType: 1, renderLargerThumbnail: true } }
+        });
+      }
+    }
   } catch (err) { console.error('[welcome/goodbye]', err.message); }
 }
 
@@ -353,9 +423,17 @@ async function startWhatsAppBot(phoneNumber, telegramChatId = null) {
           let code = await trashcore.requestPairingCode(phoneNumber);
           code = code?.match(/.{1,4}/g)?.join('-') || code;
           pairingCodes.set(code, { phoneNumber });
-          bot.sendMessage(telegramChatId,
+          await bot.sendMessage(telegramChatId,
             `🔑 *Pairing code for ${phoneNumber}*\n\n\`${code}\`\n\nTap the button below to copy, then enter it on your WhatsApp.`,
-            { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '📋 Copy Pairing Code', copy_text: { text: code }]] } }
+            {
+              parse_mode: 'Markdown',
+              reply_markup: {
+                inline_keyboard: [[{
+                  text: '📋 Copy Pairing Code',
+                  copy_text: { text: code }
+                }]]
+              }
+            }
           );
           console.log(chalk.green(`Pairing code for ${phoneNumber}: ${code}`));
         } catch (err) {
