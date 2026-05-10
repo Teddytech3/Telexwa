@@ -63,6 +63,8 @@ app.post('/api/pair', async (req, res) => {
     if (!phoneNumber) return res.status(400).json({ error: 'Phone number required' });
 
     const cleanNum = phoneNumber.replace(/[^0-9]/g, '');
+    if (cleanNum.length < 10) return res.status(400).json({ error: 'Invalid phone number. Use format: 254712345678' });
+
     const sessionPath = path.join(__dirname, 'trash_baileys', `session_${cleanNum}`);
     if (!fs.existsSync(sessionPath)) fs.mkdirSync(sessionPath, { recursive: true });
 
@@ -78,7 +80,7 @@ app.post('/api/pair', async (req, res) => {
 
     let replied = false;
 
-    tempSock.ev.on('connection.update', async ({ pairingCode, connection }) => {
+    tempSock.ev.on('connection.update', async ({ pairingCode, connection, lastDisconnect }) => {
       if (pairingCode &&!replied) {
         replied = true;
         const code = pairingCode.match(/.{1,4}/g).join('-');
@@ -87,7 +89,9 @@ app.post('/api/pair', async (req, res) => {
       }
       if (connection === 'close' &&!replied) {
         replied = true;
-        if (!res.headersSent) res.status(500).json({ error: 'Connection closed before code generated' });
+        const reason = lastDisconnect?.error?.message || 'Connection closed by WhatsApp';
+        console.error(`[Pair Error ${cleanNum}]:`, reason);
+        if (!res.headersSent) res.status(500).json({ error: reason });
       }
     });
 
@@ -96,12 +100,14 @@ app.post('/api/pair', async (req, res) => {
     setTimeout(() => {
       if (!replied) {
         replied = true;
-        if (!res.headersSent) res.status(500).json({ error: 'Timeout generating code' });
+        console.error(`[Pair Timeout ${cleanNum}]`);
+        if (!res.headersSent) res.status(500).json({ error: 'Timeout: WhatsApp did not return a code. Try again in 30s' });
         tempSock?.end();
       }
     }, 20000);
 
   } catch (err) {
+    console.error('[Pair Fatal Error]:', err);
     if (!res.headersSent) res.status(500).json({ error: err.message });
     tempSock?.end();
   }
@@ -122,7 +128,6 @@ console.log(chalk.green('✅ Telegram bot started.'));
 bot.on('polling_error', (err) => console.error(chalk.red('[Telegram Polling Error]:'), err.message));
 
 const REQUIRED_GROUP_USERNAME = 'free_net_zone2';
-const TELEGRAM_ADMIN_IDS = ['7324745438'];
 
 async function isGroupMember(userId) {
   try {
@@ -130,7 +135,7 @@ async function isGroupMember(userId) {
     return ['member', 'administrator', 'creator'].includes(member.status);
   } catch (err) {
     console.error(chalk.yellow(`[Group Check Error]: ${err.message}`));
-    return true; // allow if check fails so bot doesn't lock everyone out
+    return true;
   }
 }
 
