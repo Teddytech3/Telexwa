@@ -1,96 +1,114 @@
-const Database = require("better-sqlite3");
-const path = require("path");
-const fs = require("fs");
+const sqlite3 = require('sqlite3').verbose();
+const path = require('path');
 
-let db;
+const dbPath = path.join(__dirname, 'teddy.db');
+const db = new sqlite3.Database(dbPath);
 
-function initDatabase() {
-  const dbFolder = path.join(__dirname, "database");
-  if (!fs.existsSync(dbFolder)) fs.mkdirSync(dbFolder);
+async function initDatabase() {
+  return new Promise((resolve, reject) => {
+    db.serialize(() => {
+      db.run(`CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT
+      )`);
 
-  const dbPath = path.join(dbFolder, "trashbot.db");
-  db = new Database(dbPath);
+      db.run(`CREATE TABLE IF NOT EXISTS tg_users (
+        tg_id INTEGER PRIMARY KEY,
+        username TEXT,
+        first_name TEXT,
+        phone_number TEXT
+      )`);
 
-  db.prepare(`
-    CREATE TABLE IF NOT EXISTS settings (
-      key TEXT PRIMARY KEY,
-      value TEXT
-    )
-  `).run();
+      db.run(`CREATE TABLE IF NOT EXISTS message_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id TEXT,
+        sender TEXT,
+        message TEXT,
+        timestamp INTEGER
+      )`, (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+  });
+}
 
-  db.prepare(`
-    CREATE TABLE IF NOT EXISTS messages (
-      id TEXT PRIMARY KEY,
-      chatId TEXT,
-      senderId TEXT,
-      body TEXT,
-      timestamp INTEGER
-    )
-  `).run();
-
-  db.prepare(`
-    CREATE TABLE IF NOT EXISTS tg_users (
-      tg_id TEXT PRIMARY KEY,
-      username TEXT,
-      first_name TEXT,
-      phone_number TEXT,
-      first_seen INTEGER,
-      last_seen INTEGER
-    )
-  `).run();
-
-  return db;
+function getSetting(key, def = null) {
+  return new Promise((resolve) => {
+    db.get('SELECT value FROM settings WHERE key =?', [key], (err, row) => {
+      if (err ||!row) return resolve(def);
+      try {
+        resolve(JSON.parse(row.value));
+      } catch {
+        resolve(row.value);
+      }
+    });
+  });
 }
 
 function setSetting(key, value) {
-  const stmt = db.prepare(`
-    INSERT INTO settings (key, value) VALUES (?, ?)
-    ON CONFLICT(key) DO UPDATE SET value=excluded.value
-  `);
-  stmt.run(key, JSON.stringify(value));
-}
-
-function getSetting(key, defaultValue = null) {
-  const row = db.prepare("SELECT value FROM settings WHERE key=?").get(key);
-  return row ? JSON.parse(row.value) : defaultValue;
+  return new Promise((resolve, reject) => {
+    const val = typeof value === 'object'? JSON.stringify(value) : String(value);
+    db.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)', [key, val], (err) => {
+      if (err) reject(err);
+      else resolve();
+    });
+  });
 }
 
 function upsertTgUser({ tg_id, username, first_name, phone_number }) {
-  const now = Date.now();
-  const existing = db.prepare("SELECT tg_id FROM tg_users WHERE tg_id=?").get(String(tg_id));
-  if (existing) {
-    db.prepare("UPDATE tg_users SET username=?, first_name=?, phone_number=?, last_seen=? WHERE tg_id=?")
-      .run(username || '', first_name || '', phone_number || '', now, String(tg_id));
-  } else {
-    db.prepare("INSERT INTO tg_users (tg_id, username, first_name, phone_number, first_seen, last_seen) VALUES (?,?,?,?,?,?)")
-      .run(String(tg_id), username || '', first_name || '', phone_number || '', now, now);
-  }
+  return new Promise((resolve, reject) => {
+    db.run(
+      'INSERT OR REPLACE INTO tg_users (tg_id, username, first_name, phone_number) VALUES (?,?,?)',
+      [tg_id, username, first_name, phone_number],
+      (err) => {
+        if (err) reject(err);
+        else resolve();
+      }
+    );
+  });
 }
 
 function getTgUsers() {
-  return db.prepare("SELECT * FROM tg_users ORDER BY last_seen DESC").all();
+  return new Promise((resolve, reject) => {
+    db.all('SELECT * FROM tg_users', [], (err, rows) => {
+      if (err) reject(err);
+      else resolve(rows);
+    });
+  });
 }
 
 function getTgUserCount() {
-  const row = db.prepare("SELECT COUNT(*) as count FROM tg_users").get();
-  return row ? row.count : 0;
+  return new Promise((resolve, reject) => {
+    db.get('SELECT COUNT(*) as count FROM tg_users', [], (err, row) => {
+      if (err) reject(err);
+      else resolve(row.count);
+    });
+  });
 }
 
-function cleanupOldMessages(hours = 24) {
-  if (!db) return 0;
-  const cutoff = Date.now() - hours * 60 * 60 * 1000;
-  const stmt = db.prepare("DELETE FROM messages WHERE timestamp < ?");
-  const info = stmt.run(cutoff);
-  return info.changes || 0;
+function logMessage(m, trashcore) {
+  return new Promise((resolve) => {
+    const chat_id = m.key.remoteJid;
+    const sender = m.key.participant || m.key.remoteJid;
+    const message = m.message?.conversation || m.message?.extendedTextMessage?.text || '[media]';
+    const timestamp = Date.now();
+
+    db.run(
+      'INSERT INTO message_logs (chat_id, sender, message, timestamp) VALUES (?,?,?)',
+      [chat_id, sender, message, timestamp],
+      () => resolve()
+    );
+  });
 }
 
 module.exports = {
   initDatabase,
-  setSetting,
   getSetting,
+  setSetting,
   upsertTgUser,
   getTgUsers,
   getTgUserCount,
-  cleanupOldMessages,
+  logMessage,
   db
 };
