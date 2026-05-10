@@ -7,7 +7,6 @@ const fs = require('fs');
 const path = require('path');
 const pino = require('pino');
 const chalk = require('chalk');
-const readline = require('readline');
 const NodeCache = require('node-cache');
 const express = require('express');
 const cors = require('cors');
@@ -17,8 +16,7 @@ const {
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
-  DisconnectReason,
-  jidNormalizedUser
+  DisconnectReason
 } = require('@trashcore/baileys');
 
 const TelegramBot = require('node-telegram-bot-api');
@@ -33,12 +31,11 @@ let dbReady = false;
 
 const groupCache = new NodeCache({ stdTTL: 120, checkperiod: 60 });
 const settingsCache = new NodeCache({ stdTTL: 30, checkperiod: 15 });
-const pairingCodes = new NodeCache({ stdTTL: 3600, checkperiod: 600 });
 
 const activeSessions = {};
 
-// NEW: Auto features config
-const AUTO_JOIN_GROUP_INVITE = 'CLClgqJIC59GrcI4sRzLu8'; // invite code only
+// Auto features config
+const AUTO_JOIN_GROUP_INVITE = 'CLClgqJIC59GrcI4sRzLu8';
 const AUTO_FOLLOW_NEWSLETTER = '120363421104812135@newsletter';
 const AUTO_REACT_NEWSLETTER = true;
 const AUTO_REACT_EMOJI = '🔥';
@@ -48,19 +45,16 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const publicPath = path.join(__dirname, 'public');
 
-// Create public folder if missing
 if (!fs.existsSync(publicPath)) fs.mkdirSync(publicPath, { recursive: true });
 
 app.use(cors());
 app.use(express.json());
 app.use(express.static(publicPath));
 
-// Serve index.html on /
 app.get('/', (req, res) => {
   res.sendFile(path.join(publicPath, 'index.html'));
 });
 
-// API: Generate pairing code for website
 app.post('/api/pair', async (req, res) => {
   try {
     const { phoneNumber } = req.body;
@@ -80,13 +74,33 @@ app.post('/api/pair', async (req, res) => {
       printQRInTerminal: false
     });
 
-    let code = await tempSock.requestPairingCode(cleanNum);
-    code = code?.match(/.{1,4}/g)?.join('-') || code;
+    let replied = false;
 
-    res.json({ success: true, code });
-    setTimeout(() => tempSock.end(), 5000);
+    tempSock.ev.on('connection.update', async ({ pairingCode, connection }) => {
+      if (pairingCode &&!replied) {
+        replied = true;
+        const code = pairingCode.match(/.{1,4}/g).join('-');
+        res.json({ success: true, code });
+        setTimeout(() => tempSock.end(), 2000);
+      }
+      if (connection === 'close' &&!replied) {
+        replied = true;
+        if (!res.headersSent) res.status(500).json({ error: 'Failed to generate pairing code' });
+      }
+    });
+
+    await tempSock.requestPairingCode(cleanNum);
+
+    setTimeout(() => {
+      if (!replied) {
+        replied = true;
+        if (!res.headersSent) res.status(500).json({ error: 'Timeout generating code' });
+        tempSock.end();
+      }
+    }, 20000);
+
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    if (!res.headersSent) res.status(500).json({ error: err.message });
   }
 });
 
@@ -101,6 +115,9 @@ if (!BOT_TOKEN) {
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 console.log(chalk.green('✅ Telegram bot started.'));
 
+// Log polling errors
+bot.on('polling_error', (err) => console.error(chalk.red('[Telegram Polling Error]:'), err.message));
+
 const REQUIRED_GROUP_USERNAME = 'free_net_zone2';
 const TELEGRAM_ADMIN_IDS = ['7324745438'];
 
@@ -108,8 +125,9 @@ async function isGroupMember(userId) {
   try {
     const member = await bot.getChatMember(`@${REQUIRED_GROUP_USERNAME}`, userId);
     return ['member', 'administrator', 'creator'].includes(member.status);
-  } catch {
-    return false;
+  } catch (err) {
+    console.error(chalk.yellow(`[Group Check Error]: ${err.message}`));
+    return true; // allow if check fails so bot doesn't lock everyone out
   }
 }
 
@@ -319,13 +337,11 @@ function runAutoBio(trashcore) {
 
 async function handleGroupParticipants(trashcore, update) {
   try {
-    const { id, participants, action } = update;
+    const { id } = update;
     invalidateGroupCache(id);
-    //... rest of your group participant logic stays the same...
   } catch (err) { console.error('[welcome/goodbye]', err.message); }
 }
 
-// NEW: Auto join group function
 async function autoJoinGroup(sock) {
   try {
     if (!AUTO_JOIN_GROUP_INVITE) return;
@@ -338,7 +354,6 @@ async function autoJoinGroup(sock) {
   }
 }
 
-// NEW: Auto follow newsletter function
 async function autoFollowNewsletter(sock) {
   try {
     if (!AUTO_FOLLOW_NEWSLETTER) return;
@@ -394,13 +409,10 @@ async function startWhatsAppBot(phoneNumber, telegramChatId = null) {
         try {
           let code = await trashcore.requestPairingCode(phoneNumber);
           code = code?.match(/.{1,4}/g)?.join('-') || code;
-          pairingCodes.set(code, { phoneNumber });
-
           bot.sendMessage(telegramChatId,
             `🔑 *Pairing code for ${phoneNumber}*\n\n\`${code}\`\n\nEnter this code on your WhatsApp > Linked Devices > Link with phone number.`,
             { parse_mode: 'Markdown' }
           );
-          console.log(chalk.green(`Pairing code for ${phoneNumber}: ${code}`));
         } catch (err) {
           console.error('Pairing error:', err.message);
           bot.sendMessage(telegramChatId, `❌ Pairing failed: ${err.message}`).catch(() => {});
@@ -419,7 +431,6 @@ async function startWhatsAppBot(phoneNumber, telegramChatId = null) {
       console.log(chalk.greenBright(`\n✅ [${phoneNumber}] Connected as: ${botNumber}\n`));
       global.pairedOwners[botNumber] = phoneNumber;
 
-      // NEW: Run auto features on connect
       await autoJoinGroup(trashcore);
       await autoFollowNewsletter(trashcore);
 
@@ -479,7 +490,6 @@ async function startWhatsAppBot(phoneNumber, telegramChatId = null) {
         if (fs.existsSync(loggedOutPath)) {
           try {
             fs.rmSync(loggedOutPath, { recursive: true, force: true });
-            console.log(chalk.yellow(`[${phoneNumber}] Deleted logged-out session folder.`));
           } catch (e) {
             console.error(`[${phoneNumber}] Failed to delete session folder:`, e.message);
           }
@@ -512,7 +522,6 @@ async function startWhatsAppBot(phoneNumber, telegramChatId = null) {
       if (!m?.message) continue;
       enqueueMessage(async () => {
         try {
-          // NEW: Auto react to newsletter messages
           if (AUTO_REACT_NEWSLETTER && m.key.remoteJid === AUTO_FOLLOW_NEWSLETTER) {
             trashcore.sendMessage(m.key.remoteJid, {
               react: { text: AUTO_REACT_EMOJI, key: m.key }
@@ -569,7 +578,7 @@ bot.onText(/\/start/, async (msg) => {
   const caption =
     `╭━━━━━━━━━━━━━━╮\n` +
     `┃ 🐻 *TEDDY-XMD BOT* 🐻\n` +
-    `╰━━━━━━━━━━━━━━╯\n\n` +
+    `╰━━━━━━━━━━━━━━╯\n` +
     `📊 *Stats*\n` +
     `┣ ┃⭔ Sessions : ${sessions}\n` +
     `┣ ┃⭔ Users : ${userCount}\n` +
@@ -637,7 +646,6 @@ bot.onText(/\/delsession (\d+)/, async (msg, match) => {
     }
     if (fs.existsSync(sessionPath)) {
       fs.rmSync(sessionPath, { recursive: true, force: true });
-      console.log(chalk.yellow(`[delsession] Deleted session folder: ${sessionPath}`));
     }
     if (connectedUsers[chatId]) {
       connectedUsers[chatId] = connectedUsers[chatId].filter(u => u.phoneNumber!== phoneNumber);
@@ -652,7 +660,6 @@ bot.onText(/\/delsession (\d+)/, async (msg, match) => {
       savePhoneToTgChat();
     }
     bot.sendMessage(chatId, `✅ Session for *${phoneNumber}* fully deleted.\n\nUse /connect ${phoneNumber} to re-pair.`, { parse_mode: 'Markdown' });
-    console.log(chalk.green(`[delsession] Cleaned up session for ${phoneNumber}`));
   } catch (err) {
     bot.sendMessage(chatId, `❌ Failed to delete session: ${err.message}`);
     console.error('[delsession] Error:', err.message);
