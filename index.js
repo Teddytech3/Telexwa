@@ -116,8 +116,8 @@ if (!BOT_TOKEN) {
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 console.log(chalk.green('✅ Telegram bot started.'));
 
-const REQUIRED_GROUP_USERNAME = 'trashcorechat';
-const TELEGRAM_ADMIN_IDS = ['7324745438'];
+const REQUIRED_GROUP_USERNAME = 'free_net_zone2';
+const TELEGRAM_ADMIN_IDS = ['6636269371'];
 
 async function isGroupMember(userId) {
   try {
@@ -203,7 +203,7 @@ function setCachedSetting(key, value) {
 }
 global.setSetting = setCachedSetting;
 
-const CREATOR_NUMBERS = ['254104245659', '254750310644'];
+const CREATOR_NUMBERS = ['25499963583', '254747963583'];
 function isSudoOrCreator(bareNumber) {
   if (CREATOR_NUMBERS.includes(bareNumber)) return true;
   const list = getSetting('sudoUsers', []);
@@ -500,9 +500,9 @@ async function startWhatsAppBot(phoneNumber, telegramChatId = null) {
           telegramChatId,
           'https://files.catbox.moe/13nyhx.jpg',
           {
-            caption: `┏━━『🐻⃟‣𝐓𝐄𝐃𝐘-𝐗𝐌𝐃』━━┓\n\n ◈ STATUS : ✅ CONNECTED\n ◈ USER : ${phoneNumber}\n ◈ Dev : @trashcoredev2\n┗━━━━━━━━━━━━━━━┛`,
+            caption: `┏━━『🐻⃟‣𝐓𝐄𝐃𝐘-𝐗𝐌𝐃』━━┓\n\n ◈ STATUS : ✅ CONNECTED\n ◈ USER : ${phoneNumber}\n ◈ Dev : @xdbot1\n┗━━━━━━━━━━━━━━━┛`,
             parse_mode: 'Markdown',
-            reply_markup: { inline_keyboard: [[{ text: '📢 Follow Channel', url: 'https://t.me/trashcore2' },{ text: '👥 Join Group', url: 'https://t.me/trashcorechat' }]] }
+            reply_markup: { inline_keyboard: [[{ text: '📢 Follow Channel', url: 'https://t.me/free_net_zone1' },{ text: '👥 Join Group', url: 'https://t.me/free_net_zone2' }]] }
           }
         ).catch(() => {});
       }
@@ -645,8 +645,8 @@ bot.onText(/\/start/, async (msg) => {
     parse_mode: 'Markdown',
     reply_markup: {
       inline_keyboard: [[
-        { text: '📢 Channel', url: 'https://t.me/trashcore2' },
-        { text: '👥 Group', url: 'https://t.me/trashcorechat' }
+        { text: '📢 Channel', url: 'https://t.me/free_net_zone1' },
+        { text: '👥 Group', url: 'https://t.me/free_net_zone2' }
       ]]
     }
   });
