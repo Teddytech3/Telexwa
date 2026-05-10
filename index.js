@@ -1,15 +1,15 @@
 // ============================================================
 // TEDDY-XMD — by Trashcore
 // index.js | BaseBot V4 + Telegram multi-session pairing + Web Panel
+// No external deps for web panel - uses built-in http
 // ============================================================
 
 const fs = require('fs');
 const path = require('path');
+const http = require('http');
 const pino = require('pino');
 const chalk = require('chalk');
 const NodeCache = require('node-cache');
-const express = require('express');
-const cors = require('cors');
 
 const {
   default: makeWASocket,
@@ -35,44 +35,77 @@ const pairingCodes = new NodeCache({ stdTTL: 3600, checkperiod: 600 });
 
 const activeSessions = {};
 
-// ─── Express Web Panel ────────────────────────────────────────
-const app = express();
+// ─── Built-in HTTP Web Panel ────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
-app.use(cors());
-app.use(express.json());
-app.use(express.static('public'));
 
-// API: Generate pairing code for website
-app.post('/api/pair', async (req, res) => {
-  try {
-    const { phoneNumber } = req.body;
-    if (!phoneNumber) return res.status(400).json({ error: 'Phone number required' });
+const server = http.createServer(async (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-    const cleanNum = phoneNumber.replace(/[^0-9]/g, '');
-    const sessionPath = path.join(__dirname, 'trash_baileys', `session_${cleanNum}`);
-    if (!fs.existsSync(sessionPath)) fs.mkdirSync(sessionPath, { recursive: true });
-
-    const { state } = await useMultiFileAuthState(sessionPath);
-    const { version } = await fetchLatestBaileysVersion();
-
-    const tempSock = makeWASocket({
-      version,
-      auth: state,
-      logger: pino({ level: 'silent' }),
-      printQRInTerminal: false
-    });
-
-    let code = await tempSock.requestPairingCode(cleanNum);
-    code = code?.match(/.{1,4}/g)?.join('-') || code;
-
-    res.json({ success: true, code });
-    setTimeout(() => tempSock.end(), 5000);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204);
+    res.end();
+    return;
   }
+
+  if (req.method === 'GET' && (req.url === '/' || req.url === '/index.html')) {
+    const filePath = path.join(__dirname, 'public', 'index.html');
+    if (fs.existsSync(filePath)) {
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      fs.createReadStream(filePath).pipe(res);
+    } else {
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('public/index.html not found');
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && req.url === '/api/pair') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { phoneNumber } = JSON.parse(body);
+        if (!phoneNumber) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Phone number required' }));
+          return;
+        }
+
+        const cleanNum = phoneNumber.replace(/[^0-9]/g, '');
+        const sessionPath = path.join(__dirname, 'trash_baileys', `session_${cleanNum}`);
+        if (!fs.existsSync(sessionPath)) fs.mkdirSync(sessionPath, { recursive: true });
+
+        const { state } = await useMultiFileAuthState(sessionPath);
+        const { version } = await fetchLatestBaileysVersion();
+
+        const tempSock = makeWASocket({
+          version,
+          auth: state,
+          logger: pino({ level: 'silent' }),
+          printQRInTerminal: false
+        });
+
+        let code = await tempSock.requestPairingCode(cleanNum);
+        code = code?.match(/.{1,4}/g)?.join('-') || code;
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, code }));
+        setTimeout(() => tempSock.end(), 5000);
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+    });
+    return;
+  }
+
+  res.writeHead(404, { 'Content-Type': 'text/plain' });
+  res.end('Not Found');
 });
 
-app.listen(PORT, () => console.log(chalk.cyan(`🌐 Web panel running on port ${PORT}`)));
+server.listen(PORT, () => console.log(chalk.cyan(`🌐 Web panel running on port ${PORT}`)));
 
 // ─── Telegram bot ─────────────────────────────────────────────
 const BOT_TOKEN = process.env.BOT_TOKEN || config.BOT_TOKEN || '';
@@ -143,7 +176,6 @@ function totalSessions() {
   return Object.values(connectedUsers).reduce((sum, arr) => sum + (arr?.length || 0), 0);
 }
 
-// ─── settings cache ───────────────────────────────────────────
 const GROUP_KEY_PREFIXES = ['welcome_', 'goodbye_', 'antilink_', 'antilinkgc_', 'warn_'];
 
 function getScopedSetting(trashcore, key, def = null) {
