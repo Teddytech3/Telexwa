@@ -1,0 +1,32 @@
+{
+    "name": "Trashcore",
+    "description": "A whatsApp bot based on Baileysjs linrary (Ts+Js) with Multi Device support",
+    "repository": "https://github.com/anonphoenix007/CH13",
+    "logo": "https://telegra.ph/file/7aa528767ed96ddc17bc2.jpg",
+    "keywords": ["nodejs", "bot", "whatsapp bot", "whatsapp automation", "multi device"],
+  "env": {
+    "BOT_TOKEN": {
+      "description": "Your Telegram bot token",
+      "required": true
+    },
+    "OWNER_ID": {
+      "description": "Your Telegram user ID (owner)",
+      "required": false
+    },
+    "NODE_ENV": {
+      "description": "Set to production",
+      "value": "production"
+    }
+  },
+    "buildpacks": [
+      {
+        "url": "heroku/nodejs"
+    },
+    {
+      "url": "https://github.com/jonathanong/heroku-buildpack-ffmpeg-latest"
+    },
+    {
+      "url": "https://github.com/clhuang/heroku-buildpack-webp-binaries.git"
+          }
+     ]
+} 

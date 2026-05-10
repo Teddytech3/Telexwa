@@ -1,0 +1,41 @@
+{
+  "name": "telexwa",
+  "version": "5.0.0",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node --max-old-space-size=512 --optimize-for-size index.js",
+    "start:low": "node --max-old-space-size=256 --optimize-for-size index.js",
+    "start:high": "node --max-old-space-size=1024 index.js"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "dependencies": {
+    "@trashcore/baileys": "latest",
+    "chalk": "^4.1.2",
+    "crypto": "^1.0.1",
+    "axios": "^1.7.9",
+    "api-dylux": "^1.8.5",
+    "node-fetch": "^2.7.0",
+    "node-webpmux": "^3.1.1",
+    "fluent-ffmpeg": "^2.1.2",
+    "webp-converter": "latest",
+    "yt-search": "^2.10.4",
+    "pino": "^8.17.0",
+    "better-sqlite3": "latest",
+    "jimp": "latest",
+    "cheerio": "^1.0.0",
+    "chokidar": "^3.6.0",
+    "form-data": "^4.0.1",
+    "js-confuser": "^1.7.3",
+    "wa-sticker-formatter": "^4.4.4",
+    "performance-now": "^2.1.0",
+    "moment-timezone": "^0.5.46",
+    "similarity": "^1.2.1",
+    "didyoumean": "^1.2.2",
+    "node-cache": "^5.1.2",
+    "node-telegram-bot-api": "^0.66.0"
+  },
+  "description": "BaseBot V4 + Telegram multi-session pairing"
+}
