@@ -56,6 +56,8 @@ app.get('/', (req, res) => {
 });
 
 app.post('/api/pair', async (req, res) => {
+  let tempSock = null;
+
   try {
     const { phoneNumber } = req.body;
     if (!phoneNumber) return res.status(400).json({ error: 'Phone number required' });
@@ -67,7 +69,7 @@ app.post('/api/pair', async (req, res) => {
     const { state } = await useMultiFileAuthState(sessionPath);
     const { version } = await fetchLatestBaileysVersion();
 
-    const tempSock = makeWASocket({
+    tempSock = makeWASocket({
       version,
       auth: state,
       logger: pino({ level: 'silent' }),
@@ -81,11 +83,11 @@ app.post('/api/pair', async (req, res) => {
         replied = true;
         const code = pairingCode.match(/.{1,4}/g).join('-');
         res.json({ success: true, code });
-        setTimeout(() => tempSock.end(), 2000);
+        setTimeout(() => tempSock?.end(), 2000);
       }
       if (connection === 'close' &&!replied) {
         replied = true;
-        if (!res.headersSent) res.status(500).json({ error: 'Failed to generate pairing code' });
+        if (!res.headersSent) res.status(500).json({ error: 'Connection closed before code generated' });
       }
     });
 
@@ -95,12 +97,13 @@ app.post('/api/pair', async (req, res) => {
       if (!replied) {
         replied = true;
         if (!res.headersSent) res.status(500).json({ error: 'Timeout generating code' });
-        tempSock.end();
+        tempSock?.end();
       }
     }, 20000);
 
   } catch (err) {
     if (!res.headersSent) res.status(500).json({ error: err.message });
+    tempSock?.end();
   }
 });
 
