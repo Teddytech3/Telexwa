@@ -1,1 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TEDDY-XMD Pairing</title>
+<style>
+    * { margin:0; padding:0; box-sizing:border-box; font-family:'Segoe UI', Roboto, sans-serif; }
 
+  body {
+    background:#000;
+    color:#e0e0e0;
+    overflow:hidden;
+    height:100vh;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+  }
+
+  /* Matrix canvas */
+  #matrix {
+    position:fixed;
+    top:0; left:0;
+    width:100%; height:100%;
+    z-index:0;
+    opacity:0.25;
+  }
+
+  /* Glass card */
+ .container {
+    position:relative;
+    z-index:2;
+    width:92%;
+    max-width:420px;
+    padding:28px;
+    border-radius:18px;
+    background:rgba(15,15,15,0.65);
+    backdrop-filter:blur(14px);
+    border:1px solid rgba(255,255,255,0.08);
+    box-shadow:0 8px 32px rgba(0,0,0,0.6);
+    animation:fadeIn 0.8s ease;
+  }
+
+  @keyframes fadeIn {
+    from { opacity:0; transform:translateY(20px); }
+    to { opacity:1; transform:translateY(0); }
+  }
+
+  h2 {
+    text-align:center;
+    margin-bottom:8px;
+    font-size:24px;
+    color:#fff;
+    letter-spacing:1px;
+  }
+
+ .sub {
+    text-align:center;
+    color:#aaa;
+    font-size:13px;
+    margin-bottom:20px;
+  }
+
+ .btn {
+    width:100%;
+    padding:14px;
+    margin:8px 0;
+    border:none;
+    border-radius:10px;
+    font-size:15px;
+    font-weight:600;
+    cursor:pointer;
+    transition:0.25s;
+  }
+
+ .btn-primary {
+    background:linear-gradient(135deg,#ff6b00,#ff8c00);
+    color:#fff;
+  }
+ .btn-primary:hover {
+    transform:translateY(-2px);
+    box-shadow:0 6px 20px rgba(255,107,0,0.4);
+  }
+
+ .btn-secondary {
+    background:rgba(255,255,255,0.05);
+    color:#ddd;
+    border:1px solid rgba(255,255,255,0.1);
+  }
+ .btn-secondary:hover {
+    background:rgba(255,255,255,0.1);
+  }
+
+ .divider {
+    display:flex;
+    align-items:center;
+    margin:18px 0;
+    color:#555;
+    font-size:12px;
+  }
+ .divider::before,.divider::after {
+    content:"";
+    flex:1;
+    height:1px;
+    background:rgba(255,255,255,0.1);
+  }
+ .divider span { padding:0 10px; }
+
+  input {
+    width:100%;
+    padding:14px;
+    margin:8px 0;
+    border-radius:10px;
+    border:1px solid rgba(255,255,255,0.1);
+    background:rgba(255,255,255,0.05);
+    color:#fff;
+    font-size:15px;
+    outline:none;
+    transition:0.2s;
+  }
+  input:focus {
+    border-color:#ff6b00;
+    box-shadow:0 0 0 2px rgba(255,107,0,0.2);
+  }
+
+ .code-box {
+    display:none;
+    margin-top:16px;
+    padding:18px;
+    border-radius:12px;
+    background:rgba(255,107,0,0.08);
+    border:1px solid rgba(255,107,0,0.3);
+    text-align:center;
+    animation:fadeIn 0.5s ease;
+  }
+ .code {
+    font-size:32px;
+    letter-spacing:6px;
+    font-weight:700;
+    color:#ff8c00;
+    margin:10px 0;
+    user-select:all;
+  }
+ .note {
+    font-size:12px;
+    color:#aaa;
+  }
+
+ .loader {
+    display:none;
+    text-align:center;
+    margin-top:12px;
+    color:#ff8c00;
+    font-size:14px;
+  }
+ .loader::after {
+    content:"";
+    display:inline-block;
+    width:14px; height:14px;
+    border:2px solid #ff8c00;
+    border-top-color:transparent;
+    border-radius:50%;
+    animation:spin 1s linear infinite;
+    margin-left:8px;
+    vertical-align:middle;
+  }
+  @keyframes spin { to { transform:rotate(360deg); } }
+
+ .footer {
+    text-align:center;
+    margin-top:18px;
+    font-size:12px;
+    color:#666;
+  }
+
+ .copy-btn {
+    margin-top:8px;
+    padding:8px 12px;
+    background:rgba(255,107,0,0.2);
+    border:1px solid rgba(255,107,0,0.4);
+    border-radius:8px;
+    color:#ff8c00;
+    cursor:pointer;
+    font-size:13px;
+  }
+ .copy-btn:hover {
+    background:rgba(255,107,0,0.3);
+  }
+</style>
+</head>
+<body>
+
+<canvas id="matrix"></canvas>
+
+<div class="container">
+  <h2>🐻 TEDDY-XMD</h2>
+  <p class="sub">Connect your WhatsApp bot in seconds</p>
+
+  <button class="btn btn-primary" onclick="openTelegram()">Pair via Telegram</button>
+
+  <div class="divider"><span>OR</span></div>
+
+  <input type="text" id="phone" placeholder="2547XXXXXXXX">
+  <button class="btn btn-secondary" onclick="pair()">Pair via Website</button>
+
+  <div class="loader" id="loader">Generating code</div>
+
+  <div class="code-box" id="codeBox">
+    <p>Enter this code on WhatsApp</p>
+    <div class="code" id="code">000-000</div>
+    <button class="copy-btn" onclick="copyCode()">Copy Code</button>
+    <p class="note">Code expires in 60 seconds</p>
+  </div>
+
+  <div class="footer">Powered by TEDDY-XMD © 2026</div>
+</div>
+
+<script>
+// Matrix rain effect
+const canvas = document.getElementById('matrix');
+const ctx = canvas.getContext('2d');
+
+function resizeCanvas() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+resizeCanvas();
+
+const chars = '01ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+const fontSize = 14;
+let columns = Math.floor(canvas.width / fontSize);
+let drops = Array(columns).fill(1);
+
+function drawMatrix() {
+  ctx.fillStyle = 'rgba(0,0,0,0.05)';
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+
+  ctx.fillStyle = '#ff6b00';
+  ctx.font = fontSize + 'px monospace';
+
+  for(let i=0; i<drops.length; i++) {
+    const text = chars[Math.floor(Math.random()*chars.length)];
+    ctx.fillText(text, i*fontSize, drops[i]*fontSize);
+
+    if(drops[i]*fontSize > canvas.height && Math.random() > 0.975) {
+      drops[i] = 0;
+    }
+    drops[i]++;
+  }
+}
+setInterval(drawMatrix, 50);
+
+window.addEventListener('resize', () => {
+  resizeCanvas();
+  columns = Math.floor(canvas.width / fontSize);
+  drops = Array(columns).fill(1);
+});
+
+// Pairing logic
+function openTelegram() {
+  window.open('https://t.me/trashcoredev2', '_blank');
+}
+
+async function pair() {
+  const phone = document.getElementById('phone').value.trim();
+  if(!phone) {
+    alert('Enter a phone number');
+    return;
+  }
+
+  document.getElementById('loader').style.display = 'block';
+  document.getElementById('codeBox').style.display = 'none';
+
+  try {
+    const res = await fetch('/api/pair', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({ phoneNumber: phone })
+    });
+
+    const data = await res.json();
+    document.getElementById('loader').style.display = 'none';
+
+    if(data.success) {
+      document.getElementById('code').textContent = data.code;
+      document.getElementById('codeBox').style.display = 'block';
+    } else {
+      alert('Error: ' + (data.error || 'Failed to generate code'));
+    }
+  } catch(err) {
+    document.getElementById('loader').style.display = 'none';
+    alert('Server error. Try again.');
+  }
+}
+
+function copyCode() {
+  const code = document.getElementById('code').textContent;
+  navigator.clipboard.writeText(code).then(() => {
+    alert('Code copied to clipboard');
+  });
+}
+</script>
+
+</body>
+</html>
