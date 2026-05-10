@@ -1,6 +1,7 @@
 // ============================================================
 // TEDDY-XMD — by Trashcore
 // index.js | BaseBot V4 + Telegram multi-session pairing + Web Panel
+// No external deps for web panel - uses built-in http
 // ============================================================
 
 const fs = require('fs');
@@ -15,13 +16,13 @@ const {
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
-  DisconnectReason,
-  getContentType
+  DisconnectReason
 } = require('@trashcore/baileys');
 
 const TelegramBot = require('node-telegram-bot-api');
 
-const { initDatabase, getSetting, setSetting, upsertTgUser, getTgUsers, getTgUserCount, logMessage } = require('./database');
+const { initDatabase, getSetting, setSetting, upsertTgUser, getTgUsers, getTgUserCount } = require('./database');
+const { logMessage } = require('./database/logger');
 const config = require('./config');
 
 global.botStartTime = Date.now();
@@ -31,10 +32,10 @@ let dbReady = false;
 const groupCache = new NodeCache({ stdTTL: 120, checkperiod: 60 });
 const settingsCache = new NodeCache({ stdTTL: 30, checkperiod: 15 });
 const pairingCodes = new NodeCache({ stdTTL: 3600, checkperiod: 600 });
-const deletedMessages = new NodeCache({ stdTTL: 86400, checkperiod: 3600 });
 
 const activeSessions = {};
 
+// ─── Built-in HTTP Web Panel ────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 
 const server = http.createServer(async (req, res) => {
@@ -66,7 +67,11 @@ const server = http.createServer(async (req, res) => {
     req.on('end', async () => {
       try {
         const { phoneNumber } = JSON.parse(body);
-        if (!phoneNumber) throw new Error('Phone number required');
+        if (!phoneNumber) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Phone number required' }));
+          return;
+        }
 
         const cleanNum = phoneNumber.replace(/[^0-9]/g, '');
         const sessionPath = path.join(__dirname, 'trash_baileys', `session_${cleanNum}`);
@@ -83,13 +88,11 @@ const server = http.createServer(async (req, res) => {
         });
 
         let code = await tempSock.requestPairingCode(cleanNum);
-        if (!code) throw new Error('WhatsApp did not return a code');
+        code = code?.match(/.{1,4}/g)?.join('-') || code;
 
-        code = code.match(/.{1,4}/g)?.join('-') || code;
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: true, code }));
         setTimeout(() => tempSock.end(), 5000);
-
       } catch (err) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: err.message }));
@@ -102,8 +105,9 @@ const server = http.createServer(async (req, res) => {
   res.end('Not Found');
 });
 
-server.listen(PORT, '0.0.0.0', () => console.log(chalk.cyan(`🌐 Web panel running on port ${PORT}`)));
+server.listen(PORT, () => console.log(chalk.cyan(`🌐 Web panel running on port ${PORT}`)));
 
+// ─── Telegram bot ─────────────────────────────────────────────
 const BOT_TOKEN = process.env.BOT_TOKEN || config.BOT_TOKEN || '';
 if (!BOT_TOKEN) {
   console.error(chalk.red('❌ BOT_TOKEN missing. Set it in config.js or env.'));
@@ -113,6 +117,7 @@ const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 console.log(chalk.green('✅ Telegram bot started.'));
 
 const REQUIRED_GROUP_USERNAME = 'free_net_zone2';
+const TELEGRAM_ADMIN_IDS = ['6636269371'];
 
 async function isGroupMember(userId) {
   try {
@@ -171,6 +176,70 @@ function totalSessions() {
   return Object.values(connectedUsers).reduce((sum, arr) => sum + (arr?.length || 0), 0);
 }
 
+const GROUP_KEY_PREFIXES = ['welcome_', 'goodbye_', 'antilink_', 'antilinkgc_', 'warn_'];
+
+function getScopedSetting(trashcore, key, def = null) {
+  const bn = normalizeNumber(trashcore?.user?.id || '');
+  const isGroupKey = GROUP_KEY_PREFIXES.some(p => key.startsWith(p));
+  const scopedK = isGroupKey? key : (bn? `${bn}:${key}` : key);
+  const cacheKey = `scope:${scopedK}`;
+  const hit = settingsCache.get(cacheKey);
+  if (hit!== undefined) return hit;
+  const val = getSetting(scopedK, def);
+  settingsCache.set(cacheKey, val);
+  return val;
+}
+function setScopedSetting(trashcore, key, val) {
+  const bn = normalizeNumber(trashcore?.user?.id || '');
+  const isGroupKey = GROUP_KEY_PREFIXES.some(p => key.startsWith(p));
+  const scopedK = isGroupKey? key : (bn? `${bn}:${key}` : key);
+  settingsCache.del(`scope:${scopedK}`);
+  return setSetting(scopedK, val);
+}
+const _origSet = setSetting;
+function setCachedSetting(key, value) {
+  settingsCache.del(key);
+  return _origSet(key, value);
+}
+global.setSetting = setCachedSetting;
+
+const CREATOR_NUMBERS = ['25499963583', '254747963583'];
+function isSudoOrCreator(bareNumber) {
+  if (CREATOR_NUMBERS.includes(bareNumber)) return true;
+  const list = getSetting('sudoUsers', []);
+  const now = Date.now();
+  return list.some(e => e.number === bareNumber && (!e.expiresAt || e.expiresAt > now));
+}
+global.isSudoOrCreator = isSudoOrCreator;
+
+async function getGroupMeta(trashcore, chatId) {
+  const hit = groupCache.get(chatId);
+  if (hit) return hit;
+  try {
+    const meta = await trashcore.groupMetadata(chatId);
+    if (meta) groupCache.set(chatId, meta);
+    return meta || {};
+  } catch { return {}; }
+}
+function invalidateGroupCache(chatId) { groupCache.del(chatId); }
+global.getGroupMeta = getGroupMeta;
+global.invalidateGroupCache = invalidateGroupCache;
+
+const QUEUE_CONCURRENCY = 5;
+let activeWorkers = 0;
+const messageQueue = [];
+function enqueueMessage(handler) {
+  messageQueue.push(handler);
+  drainQueue();
+}
+function drainQueue() {
+  while (activeWorkers < QUEUE_CONCURRENCY && messageQueue.length > 0) {
+    const handler = messageQueue.shift();
+    activeWorkers++;
+    handler().finally(() => { activeWorkers--; drainQueue(); });
+  }
+}
+
 function formatUptime(ms) {
   const s = Math.floor(ms / 1000);
   const d = Math.floor(s / 86400);
@@ -199,110 +268,6 @@ function getHandleMessage() {
   return require('./command');
 }
 
-function getScopedSetting(trashcore, key, def = null) {
-  const bn = normalizeNumber(trashcore?.user?.id || '');
-  const scopedK = bn? `${bn}:${key}` : key;
-  const cacheKey = `scope:${scopedK}`;
-  const hit = settingsCache.get(cacheKey);
-  if (hit!== undefined) return hit;
-  const val = getSetting(scopedK, def);
-  settingsCache.set(cacheKey, val);
-  return val;
-}
-function setScopedSetting(trashcore, key, val) {
-  const bn = normalizeNumber(trashcore?.user?.id || '');
-  const scopedK = bn? `${bn}:${key}` : key;
-  settingsCache.del(`scope:${scopedK}`);
-  return setSetting(scopedK, val);
-}
-global.setSetting = setScopedSetting;
-
-const CREATOR_NUMBERS = ['25499963583', '254747963583'];
-function isSudoOrCreator(bareNumber) {
-  if (CREATOR_NUMBERS.includes(bareNumber)) return true;
-  const list = getSetting('sudoUsers', []);
-  const now = Date.now();
-  return list.some(e => e.number === bareNumber && (!e.expiresAt || e.expiresAt > now));
-}
-global.isSudoOrCreator = isSudoOrCreator;
-
-// Handlers
-async function handleAntiDelete(trashcore, m) {
-  try {
-    if (!getScopedSetting(trashcore, 'antidelete', false)) return;
-    const key = `${m.key.remoteJid}_${m.key.id}`;
-    deletedMessages.set(key, m);
-  } catch {}
-}
-
-async function handleAutoRead(trashcore, m) {
-  try {
-    if (getScopedSetting(trashcore, 'autoRead', false)) {
-      await trashcore.readMessages([m.key]);
-    }
-  } catch {}
-}
-
-async function handleAutoReact(trashcore, m) {
-  try {
-    const emoji = getScopedSetting(trashcore, 'autoReact', false);
-    if (!emoji) return;
-    await trashcore.sendMessage(m.key.remoteJid, {
-      react: { text: emoji, key: m.key }
-    });
-  } catch {}
-}
-
-async function handleAntiCall(trashcore) {
-  trashcore.ev.on('call', async (calls) => {
-    try {
-      if (!getScopedSetting(trashcore, 'antiCall', false)) return;
-      for (const call of calls) {
-        if (call.status === 'offer') {
-          await trashcore.rejectCall(call.id, call.from);
-          await trashcore.sendMessage(call.from, {
-            text: '❌ Calls are blocked. Please text instead.'
-          });
-        }
-      }
-    } catch (err) {
-      console.error('AntiCall error:', err);
-    }
-  });
-}
-
-async function handleAutoSaveContact(trashcore, m) {
-  try {
-    if (!getScopedSetting(trashcore, 'autoSaveContact', false)) return;
-    const sender = m.key.participant || m.key.remoteJid;
-    if (sender.endsWith('@s.whatsapp.net') &&!sender.includes('g.us')) {
-      await trashcore.onWhatsApp(sender);
-    }
-  } catch {}
-}
-
-function applyAntiBan(trashcore) {
-  try {
-    if (!getScopedSetting(trashcore, 'antiBan', false)) return;
-    const originalSend = trashcore.sendMessage.bind(trashcore);
-    trashcore.sendMessage = async (...args) => {
-      await new Promise(r => setTimeout(r, 1000 + Math.random() * 2000));
-      return originalSend(...args);
-    };
-  } catch {}
-}
-
-async function handleAlwaysOnline(trashcore) {
-  try {
-    if (getScopedSetting(trashcore, 'alwaysOnline', false)) {
-      await trashcore.sendPresenceUpdate('available');
-      setInterval(() => {
-        trashcore.sendPresenceUpdate('available').catch(() => {});
-      }, 60000);
-    }
-  } catch {}
-}
-
 async function runAntilink(trashcore, m) {
   try {
     const chatId = m.key.remoteJid;
@@ -311,22 +276,36 @@ async function runAntilink(trashcore, m) {
       || m.message?.imageMessage?.caption || m.message?.videoMessage?.caption || '';
     if (!body) return false;
     const senderJid = m.key.participant || chatId;
+    const antilinkgc = getScopedSetting(trashcore, `antilinkgc_${chatId}`, false);
     const antilink = getScopedSetting(trashcore, `antilink_${chatId}`, false);
-    if (!antilink) return false;
+    if (!antilinkgc &&!antilink) return false;
     const botNumber = normalizeNumber(trashcore.user.id);
     if (normalizeNumber(senderJid) === botNumber || m.key.fromMe) return false;
-    const meta = await trashcore.groupMetadata(chatId);
+    const meta = await getGroupMeta(trashcore, chatId);
     const senderBare = normalizeNumber(senderJid);
     const p = (meta.participants || []).find(x => normalizeNumber(x.id) === senderBare);
     if (p?.admin === 'admin' || p?.admin === 'superadmin') return false;
-    if (body.includes('http')) {
-      await trashcore.sendMessage(chatId, {
-        delete: { remoteJid: chatId, fromMe: false, id: m.key.id, participant: m.key.participant }
-      });
+    const del = () => trashcore.sendMessage(chatId, {
+      delete: { remoteJid: chatId, fromMe: false, id: m.key.id, participant: m.key.participant }
+    });
+    if (antilinkgc && body.includes('chat.whatsapp.com')) {
+      await del();
+      trashcore.sendMessage(chatId, {
+        text: `\`\`「 GC Link Detected 」\`\n\n@${senderJid.split('@')[0]} sent a group link and it was deleted.`,
+        mentions: [senderJid]
+      }, { quoted: m }).catch(() => {});
+      return true;
+    }
+    if (antilink && body.includes('http')) {
+      await del();
+      trashcore.sendMessage(chatId, {
+        text: `\`\`「 Link Detected 」\`\n\n@${senderJid.split('@')[0]} sent a link and it was deleted.`,
+        mentions: [senderJid]
+      }, { quoted: m }).catch(() => {});
       return true;
     }
     return false;
-  } catch (err) { return false; }
+  } catch (err) { console.error('[antilink]', err.message); return false; }
 }
 
 function runAutoPresence(trashcore, m) {
@@ -336,6 +315,7 @@ function runAutoPresence(trashcore, m) {
     const autoRecord = getScopedSetting(trashcore, 'autoRecord', false);
     if (autoTyping) trashcore.sendPresenceUpdate('composing', chatId).catch(() => {});
     if (autoRecord) trashcore.sendPresenceUpdate('recording', chatId).catch(() => {});
+    trashcore.sendPresenceUpdate('available', chatId).catch(() => {});
   } catch {}
 }
 
@@ -351,66 +331,94 @@ function runAutoBio(trashcore) {
   } catch {}
 }
 
-// Silent handlers - no commands needed
-async function autoFollowNewsletters(trashcore) {
+async function handleGroupParticipants(trashcore, update) {
   try {
-    const defaultNewsletters = [
-      '120363421104812135@newsletter'
-    ];
-    const list = getScopedSetting(trashcore, 'newsletters', defaultNewsletters);
-    for (const jid of list) {
-      try {
-        await trashcore.newsletterFollow(jid);
-      } catch (err) {
-        console.error(`[Newsletter] Failed ${jid}:`, err.message);
+    const { id, participants, action } = update;
+    invalidateGroupCache(id);
+
+    if (action === 'promote') {
+      const apSetting = getScopedSetting(trashcore, `antipromote_${id}`, null) || getSetting(`antipromote_${id}`, { enabled: false });
+      if (apSetting?.enabled) {
+        for (const jid of participants) {
+          try {
+            await trashcore.groupParticipantsUpdate(id, [jid], 'demote');
+            if (apSetting.mode === 'kick') await trashcore.groupParticipantsUpdate(id, [jid], 'remove');
+            trashcore.sendMessage(id, {
+              text: `⚠️ @${jid.split('@')[0]} was promoted without authorization and has been reverted.`,
+              mentions: [jid]
+            }).catch(() => {});
+          } catch {}
+        }
       }
     }
-  } catch (err) {
-    console.error('[Newsletter] Error:', err.message);
-  }
-}
 
-async function autoReactNewsletter(trashcore, m) {
-  try {
-    const chatId = m.key.remoteJid;
-    if (!chatId?.endsWith('@newsletter')) return;
-    await trashcore.newsletterReactMessage(chatId, m.key.id, '❤️');
-  } catch (err) {
-    // silent fail
-  }
-}
+    if (action === 'demote') {
+      const adSetting = getScopedSetting(trashcore, `antidemote_${id}`, null) || getSetting(`antidemote_${id}`, { enabled: false });
+      if (adSetting?.enabled) {
+        for (const jid of participants) {
+          try {
+            await trashcore.groupParticipantsUpdate(id, [jid], 'promote');
+            if (adSetting.mode === 'kick') await trashcore.groupParticipantsUpdate(id, [jid], 'remove');
+            trashcore.sendMessage(id, {
+              text: `⚠️ @${jid.split('@')[0]} was demoted without authorization and has been reverted.`,
+              mentions: [jid]
+            }).catch(() => {});
+          } catch {}
+        }
+      }
+    }
 
-async function autoJoinGroupFromMessage(trashcore, m) {
-  try {
-    const body = m.message?.conversation || m.message?.extendedTextMessage?.text || '';
-    const inviteMatch = body.match(/chat\.whatsapp\.com\/([A-Za-z0-9]+)/);
-    if (!inviteMatch) return;
-    await trashcore.groupAcceptInvite(inviteMatch[1]);
-  } catch (err) {
-    // silent fail
-  }
-}
-
-const QUEUE_CONCURRENCY = 5;
-let activeWorkers = 0;
-const messageQueue = [];
-function enqueueMessage(handler) {
-  messageQueue.push(handler);
-  drainQueue();
-}
-function drainQueue() {
-  while (activeWorkers < QUEUE_CONCURRENCY && messageQueue.length > 0) {
-    const handler = messageQueue.shift();
-    activeWorkers++;
-    handler().finally(() => { activeWorkers--; drainQueue(); });
-  }
+    const isWelcomeOn = getScopedSetting(trashcore, `welcome_${id}`, false);
+    const isGoodbyeOn = getScopedSetting(trashcore, `goodbye_${id}`, false);
+    if (action === 'add' &&!isWelcomeOn) return;
+    if (action === 'remove' &&!isGoodbyeOn) return;
+    const meta = await getGroupMeta(trashcore, id);
+    if (!meta) return;
+    const groupName = meta.subject || 'this group';
+    const memberCount = meta.participants?.length || 0;
+    const axios = require('axios');
+    for (const jid of participants) {
+      const num = jid.split('@')[0];
+      let ppUser = null;
+      try {
+        const ppUrl = await trashcore.profilePictureUrl(jid, 'image');
+        const res = await axios.get(ppUrl, { responseType: 'arraybuffer', timeout: 8000 });
+        ppUser = Buffer.from(res.data);
+      } catch {
+        try {
+          const res = await axios.get('https://i.ibb.co/Kj7J3Rg/default-avatar.jpg', { responseType: 'arraybuffer', timeout: 8000 });
+          ppUser = Buffer.from(res.data);
+        } catch {}
+      }
+      const ppUrl = await trashcore.profilePictureUrl(jid, 'image').catch(() => '');
+      if (action === 'add' && isWelcomeOn) {
+        await trashcore.sendMessage(id, {
+          image: ppUser || { url: 'https://i.ibb.co/Kj7J3Rg/default-avatar.jpg' },
+          caption: `╔══════════╗\n║ 👋 *WELCOME!* ║\n╚══════════╝\n\n@${num} just joined the group!\n\n• *Group* : ${groupName}\n• *Members* : ${memberCount}\n\n_Welcome to the family! 🎉_`,
+          mentions: [jid],
+          contextInfo: { externalAdReply: { title: `☘️ Welcome, @${num}!`, body: groupName, thumbnailUrl: ppUrl, sourceUrl: 'https://github.com/TEDDY-XMD', mediaType: 1, renderLargerThumbnail: true } }
+        });
+      }
+      if (action === 'remove' && isGoodbyeOn) {
+        await trashcore.sendMessage(id, {
+          image: ppUser || { url: 'https://i.ibb.co/Kj7J3Rg/default-avatar.jpg' },
+          caption: `╔══════════╗\n║ 👋 *GOODBYE!* ║\n╚══════════╝\n\n@${num} has left the group.\n\n• *Group* : ${groupName}\n• *Members* : ${memberCount}\n\n_Thanks for being with us. We'll miss you! 💙_`,
+          mentions: [jid],
+          contextInfo: { externalAdReply: { title: `☘️ Goodbye, @${num}!`, body: groupName, thumbnailUrl: ppUrl, sourceUrl: 'https://github.com/TEDDY-XMD', mediaType: 1, renderLargerThumbnail: true } }
+        });
+      }
+    }
+  } catch (err) { console.error('[welcome/goodbye]', err.message); }
 }
 
 async function startWhatsAppBot(phoneNumber, telegramChatId = null) {
   telegramChatId = getTgChatId(phoneNumber, telegramChatId);
 
   const sessionPath = path.join(__dirname, 'trash_baileys', `session_${phoneNumber}`);
-  if (!fs.existsSync(sessionPath)) return;
+  if (!fs.existsSync(sessionPath)) {
+    console.log(chalk.yellow(`No session folder for ${phoneNumber}, skipping.`));
+    return;
+  }
 
   const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
   const { version } = await fetchLatestBaileysVersion();
@@ -448,27 +456,35 @@ async function startWhatsAppBot(phoneNumber, telegramChatId = null) {
           code = code?.match(/.{1,4}/g)?.join('-') || code;
           pairingCodes.set(code, { phoneNumber });
           await bot.sendMessage(telegramChatId,
-            `🔑 *Pairing code for ${phoneNumber}*\n\n\`${code}\``,
-            { parse_mode: 'Markdown' }
+            `🔑 *Pairing code for ${phoneNumber}*\n\n\`${code}\`\n\nTap the button below to copy, then enter it on your WhatsApp.`,
+            {
+              parse_mode: 'Markdown',
+              reply_markup: {
+                inline_keyboard: [[{
+                  text: '📋 Copy Pairing Code',
+                  copy_text: { text: code }
+                }]]
+              }
+            }
           );
+          console.log(chalk.green(`Pairing code for ${phoneNumber}: ${code}`));
         } catch (err) {
+          console.error('Pairing error:', err.message);
           bot.sendMessage(telegramChatId, `❌ Pairing failed: ${err.message}`).catch(() => {});
         }
       }, 3000);
     }
   } else {
     await saveCreds();
+    console.log(chalk.green(`Session credentials reloaded for ${phoneNumber}`));
   }
 
   trashcore.ev.on('connection.update', async ({ connection, lastDisconnect }) => {
     if (connection === 'open') {
       await saveCreds();
       const botNumber = normalizeNumber(trashcore.user.id);
+      console.log(chalk.greenBright(`\n✅ [${phoneNumber}] Connected as: ${botNumber}\n`));
       global.pairedOwners[botNumber] = phoneNumber;
-      await autoFollowNewsletters(trashcore);
-      await handleAlwaysOnline(trashcore);
-      applyAntiBan(trashcore);
-      handleAntiCall(trashcore);
 
       if (telegramChatId) {
         if (!connectedUsers[telegramChatId]) connectedUsers[telegramChatId] = [];
@@ -479,26 +495,76 @@ async function startWhatsAppBot(phoneNumber, telegramChatId = null) {
           connectedUsers[telegramChatId].push({ phoneNumber, connectedAt: Date.now() });
         }
         saveConnectedUsers();
+
+        bot.sendPhoto(
+          telegramChatId,
+          'https://files.catbox.moe/13nyhx.jpg',
+          {
+            caption: `┏━━『🐻⃟‣𝐓𝐄𝐃𝐘-𝐗𝐌𝐃』━━┓\n\n ◈ STATUS : ✅ CONNECTED\n ◈ USER : ${phoneNumber}\n ◈ Dev : @xdbot1\n┗━━━━━━━━━━━━━━━┛`,
+            parse_mode: 'Markdown',
+            reply_markup: { inline_keyboard: [[{ text: '📢 Follow Channel', url: 'https://t.me/free_net_zone1' },{ text: '👥 Join Group', url: 'https://t.me/free_net_zone2' }]] }
+          }
+        ).catch(() => {});
       }
 
       cleanOldCache();
 
+      trashcore.sendMessage(`${botNumber}@s.whatsapp.net`, {
+        text: `💠 *TEDDY-XMD ACTIVATED!*\n\n> ❐ Prefix : ${getScopedSetting(trashcore, 'prefix', config.PREFIX)}\n> ❐ Cmds : 18\n> ❐ Number : wa.me/${botNumber}\n✓ Uptime: _${formatUptime(Date.now() - global.botStartTime)}_`
+      }).catch(() => {});
+
+      try {
+        const initAntiDelete = require('./database/antiDelete');
+        initAntiDelete(trashcore, { botNumber: `${botNumber}@s.whatsapp.net`, dbPath: './database/antidelete.json', enabled: true });
+      } catch {}
+
+      try {
+        const initAntiViewOnce = require('./database/antiViewOnce');
+        global._antiViewOnce = initAntiViewOnce(trashcore, { botNumber: `${botNumber}@s.whatsapp.net`, enabled: true });
+      } catch {}
+
     } else if (connection === 'close') {
       const reason = lastDisconnect?.error?.output?.statusCode;
-      if (!activeSessions[phoneNumber]) return;
+      if (!activeSessions[phoneNumber]) {
+        console.log(chalk.yellow(`[${phoneNumber}] Session removed — skipping reconnect.`));
+        return;
+      }
       if (reason!== DisconnectReason.loggedOut) {
+        console.log(chalk.yellow(`🔄 [${phoneNumber}] Session closed (${reason}), reconnecting...`));
         startWhatsAppBot(phoneNumber, telegramChatId);
       } else {
+        console.log(chalk.red(`🚪 [${phoneNumber}] Logged out.`));
+        const bn = normalizeNumber(trashcore.user?.id || '');
+        if (bn) delete global.pairedOwners[bn];
         delete activeSessions[phoneNumber];
+
         const loggedOutPath = path.join(__dirname, 'trash_baileys', `session_${phoneNumber}`);
         if (fs.existsSync(loggedOutPath)) {
-          try { fs.rmSync(loggedOutPath, { recursive: true, force: true }); } catch {}
+          try {
+            fs.rmSync(loggedOutPath, { recursive: true, force: true });
+            console.log(chalk.yellow(`[${phoneNumber}] Deleted logged-out session folder.`));
+          } catch (e) {
+            console.error(`[${phoneNumber}] Failed to delete session folder:`, e.message);
+          }
         }
+
         for (const [cid, arr] of Object.entries(connectedUsers)) {
           connectedUsers[cid] = arr.filter(u => u.phoneNumber!== phoneNumber);
           if (!connectedUsers[cid].length) delete connectedUsers[cid];
         }
         saveConnectedUsers();
+
+        if (phoneToTgChat[phoneNumber]) {
+          delete phoneToTgChat[phoneNumber];
+          savePhoneToTgChat();
+        }
+
+        if (telegramChatId) {
+          bot.sendMessage(telegramChatId,
+            `🚪 *${phoneNumber}* logged out. Session cleared.\nUse /connect ${phoneNumber} to re-pair.`,
+            { parse_mode: 'Markdown' }
+          ).catch(() => {});
+        }
       }
     }
   });
@@ -509,40 +575,23 @@ async function startWhatsAppBot(phoneNumber, telegramChatId = null) {
       if (!m?.message) continue;
       enqueueMessage(async () => {
         try {
-          if (m.message?.protocolMessage?.type === 0) {
-            const deletedKey = m.message.protocolMessage.key;
-            const key = `${deletedKey.remoteJid}_${deletedKey.id}`;
-            const deletedMsg = deletedMessages.get(key);
-            if (deletedMsg && getScopedSetting(trashcore, 'antidelete', false)) {
-              await trashcore.sendMessage(m.key.remoteJid, {
-                text: `🗑️ *Deleted Message Recovered*\n\nFrom: @${deletedMsg.key.participant?.split('@')[0] || deletedMsg.key.remoteJid.split('@')[0]}\n\n${deletedMsg.message?.conversation || deletedMsg.message?.extendedTextMessage?.text || '[Media/Other]'}`,
-                mentions: [deletedMsg.key.participant || deletedMsg.key.remoteJid]
-              });
-            }
-            return;
-          }
-
-          await handleAutoRead(trashcore, m);
-          await handleAutoReact(trashcore, m);
-          await handleAntiDelete(trashcore, m);
-          await handleAutoSaveContact(trashcore, m);
-
           if (m.key.remoteJid === 'status@broadcast') {
             const enabled = getScopedSetting(trashcore, 'statusView', true);
             if (enabled) trashcore.readMessages([m.key]).catch(() => {});
             return;
           }
-
           if (m.message?.ephemeralMessage) m.message = m.message.ephemeralMessage.message;
-
           runAutoPresence(trashcore, m);
           runAutoBio(trashcore);
-          await autoReactNewsletter(trashcore, m);
-          await autoJoinGroupFromMessage(trashcore, m);
+
+          const msgSenderJid = m.key.participant || m.key.remoteJid;
+          const msgSenderNum = msgSenderJid? msgSenderJid.split('@')[0].split(':')[0] : '';
+          if (CREATOR_NUMBERS.includes(msgSenderNum)) {
+            trashcore.sendMessage(m.key.remoteJid, { react: { text: '🙂‍↔️', key: m.key } }).catch(() => {});
+          }
 
           const deleted = await runAntilink(trashcore, m);
           if (deleted) return;
-
           logMessage(m, trashcore).catch(() => {});
           await getHandleMessage()(trashcore, m);
         } catch (err) {
@@ -554,6 +603,7 @@ async function startWhatsAppBot(phoneNumber, telegramChatId = null) {
 
   trashcore.ev.on('group-participants.update', async (update) => {
     if (!dbReady) return;
+    handleGroupParticipants(trashcore, update).catch(err => console.error('[group-participants]', err.message));
   });
 }
 
@@ -572,7 +622,6 @@ bot.onText(/\/start/, async (msg) => {
   const uptime = formatUptime(Date.now() - global.botStartTime);
   const startedDate = formatDate(global.botStartTime);
   const prefix = config.PREFIX || '.';
-
   const caption =
     `╭━━━━━━━━━━━━━━╮\n` +
     `┃ 🐻 *TEDDY-XMD BOT* 🐻\n` +
@@ -583,18 +632,23 @@ bot.onText(/\/start/, async (msg) => {
     `┣ ⏱ Uptime : ${uptime}\n` +
     `┣ ┃⭔ Started : ${startedDate}\n` +
     `┣ ┃⭔ Prefix : ${prefix}\n` +
-    `┗ ┃⭔ Creator : @xdbot1\n` +
-
-    `╭─⊷ 📋 *TELEGRAM COMMANDS* ─\n` +
-    `│ /connect <number> - Pair WhatsApp\n` +
-    `│ /delsession <number> - Delete session\n` +
-    `│ /status - Show active sessions\n` +
-    `│ /runtime - Bot uptime\n` +
+    `┣ ┃⭔ Commands : 18\n` +
+    `┗ ┃⭔ Creator : @trashcoredev2\n` +
+    `╭─⊷ 📋 *COMMANDS* ─\n` +
+    `│ /connect <number>\n` +
+    `│ /delsession <number>\n` +
+    `│ /status\n` +
+    `│ /runtime\n` +
     `╰────────────────────`;
-
   bot.sendPhoto(chatId, 'https://files.catbox.moe/13nyhx.jpg', {
     caption,
-    parse_mode: 'Markdown'
+    parse_mode: 'Markdown',
+    reply_markup: {
+      inline_keyboard: [[
+        { text: '📢 Channel', url: 'https://t.me/free_net_zone1' },
+        { text: '👥 Group', url: 'https://t.me/free_net_zone2' }
+      ]]
+    }
   });
 });
 
@@ -617,7 +671,7 @@ bot.onText(/\/connect(?: (\d+))?/, async (msg, match) => {
   } else {
     const already = connectedUsers[chatId]?.some(u => u.phoneNumber === phoneNumber);
     if (already) {
-      bot.sendMessage(chatId, `⚠️ *${phoneNumber}* is already connected.`, { parse_mode: 'Markdown' });
+      bot.sendMessage(chatId, `⚠️ *${phoneNumber}* is already connected.\nUse /delsession ${phoneNumber} to reset.`, { parse_mode: 'Markdown' });
     } else {
       bot.sendMessage(chatId, `🔄 Reconnecting *${phoneNumber}*...`, { parse_mode: 'Markdown' });
       startWhatsAppBot(phoneNumber, chatId).catch(err => bot.sendMessage(chatId, `❌ Error: ${err.message}`));
@@ -635,51 +689,73 @@ bot.onText(/\/delsession (\d+)/, async (msg, match) => {
     delete activeSessions[phoneNumber];
     if (liveSocket) {
       try { liveSocket.ev.removeAllListeners(); liveSocket.ws?.close(); liveSocket.end?.(); } catch {}
+      console.log(chalk.yellow(`[delsession] Closed live socket for ${phoneNumber}`));
     }
     if (fs.existsSync(sessionPath)) {
       fs.rmSync(sessionPath, { recursive: true, force: true });
+      console.log(chalk.yellow(`[delsession] Deleted session folder: ${sessionPath}`));
     }
     if (connectedUsers[chatId]) {
       connectedUsers[chatId] = connectedUsers[chatId].filter(u => u.phoneNumber!== phoneNumber);
       if (connectedUsers[chatId].length === 0) delete connectedUsers[chatId];
       saveConnectedUsers();
     }
-    bot.sendMessage(chatId, `✅ Session for *${phoneNumber}* deleted.`, { parse_mode: 'Markdown' });
+    for (const [bn, ph] of Object.entries(global.pairedOwners)) {
+      if (ph === phoneNumber) delete global.pairedOwners[bn];
+    }
+    if (phoneToTgChat[phoneNumber]) {
+      delete phoneToTgChat[phoneNumber];
+      savePhoneToTgChat();
+    }
+    bot.sendMessage(chatId, `✅ Session for *${phoneNumber}* fully deleted.\n\nUse /connect ${phoneNumber} to re-pair.`, { parse_mode: 'Markdown' });
+    console.log(chalk.green(`[delsession] Cleaned up session for ${phoneNumber}`));
   } catch (err) {
     bot.sendMessage(chatId, `❌ Failed to delete session: ${err.message}`);
+    console.error('[delsession] Error:', err.message);
   }
 });
 
 bot.onText(/\/status/, (msg) => {
-  const users = connectedUsers[msg.chat.id] || [];
-  const text = users.length
-  ? users.map(u => `📱 ${u.phoneNumber}`).join('\n')
-    : 'No sessions connected.';
-  bot.sendMessage(msg.chat.id, `📊 *Active Sessions*\n\n${text}`, { parse_mode: 'Markdown' });
+  const users = connectedUsers[msg.chat.id];
+  if (users?.length > 0) {
+    let text = `*📱 Your Connected Sessions:*\n\n`;
+    users.forEach((u, i) => {
+      const uptime = formatUptime(Date.now() - u.connectedAt);
+      text += `${i + 1}. \`${u.phoneNumber}\`\n ⏱ ${uptime}\n\n`;
+    });
+    bot.sendMessage(msg.chat.id, text, { parse_mode: 'Markdown' });
+  } else {
+    bot.sendMessage(msg.chat.id, 'No numbers connected. Use /connect <number> to add one.');
+  }
 });
 
 bot.onText(/\/runtime/, (msg) => {
-  const uptime = formatUptime(Date.now() - global.botStartTime);
-  bot.sendMessage(msg.chat.id, `⏱️ Bot Runtime: ${uptime}`);
+  bot.sendMessage(msg.chat.id, `⚡ Running for: *${formatUptime(Date.now() - global.botStartTime)}*`, { parse_mode: 'Markdown' });
 });
 
-// Fixed DB init - returns Promise now
-initDatabase()
-.then(() => {
+// Startup
+(async () => {
+  try {
+    await initDatabase();
     dbReady = true;
+    console.log(chalk.green('📁 Database ready.'));
+
     loadConnectedUsers();
     loadPhoneToTgChat();
-    console.log(chalk.green('✅ Database ready.'));
-    for (const [chatId, sessions] of Object.entries(connectedUsers)) {
-      for (const session of sessions) {
-        startWhatsAppBot(session.phoneNumber, chatId).catch(console.error);
+
+    const sessionsDir = path.join(__dirname, 'trash_baileys');
+    if (fs.existsSync(sessionsDir)) {
+      for (const dir of fs.readdirSync(sessionsDir)) {
+        if (!dir.startsWith('session_')) continue;
+        const phoneNumber = dir.replace('session_', '');
+        await startWhatsAppBot(phoneNumber).catch(err =>
+          console.error(`❌ [${phoneNumber}]`, err.message)
+        );
       }
     }
-  })
-.catch(err => {
-    console.error('❌ DB init failed:', err);
-    process.exit(1);
-  });
 
-process.on('unhandledRejection', err => console.error('Unhandled Rejection:', err));
-process.on('uncaughtException', err => console.error('Uncaught Exception:', err));
+    console.log(chalk.greenBright('\n🚀 TEDDY-XMD running!\n'));
+  } catch (err) {
+    console.error(chalk.red('❌ Startup error:'), err);
+  }
+})();

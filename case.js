@@ -6,10 +6,14 @@ const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 
-const { downloadContentFromMessage } = require('@trashcore/baileys');
+const { downloadContentFromMessage, generateWAMessageFromContent, generateWAMessageContent } = require('@trashcore/baileys');
 const { writeExifImg, writeExifVid } = require('./library/exif');
 const config = require('./config');
+const { getSetting, setSetting } = require('./database');
+
+const NEXRAY_API = 'https://api.nexray.web.id';
 
 function formatUptime(seconds) {
   seconds = Number(seconds);
@@ -43,6 +47,7 @@ async function handleCase(trashcore, m, { command, args, text, from, isOwner, is
 
   switch (command) {
 
+    // ================= MENU =================
     case 'menu':
     case 'help': {
       try {
@@ -55,18 +60,12 @@ async function handleCase(trashcore, m, { command, args, text, from, isOwner, is
         const ramMB = (process.memoryUsage().rss / 1024 / 1024).toFixed(1);
         const platform = detectPlatform();
         const ownerName = sessionGet('ownerName', 'Owner');
+        const menuSettings = sessionGet('menuSettings', { mode: 'text' });
 
         const cmds = [
-          'menu', 'ping', 'uptime', 'runtime', 'mode', 'setprefix',
-          'play', 'song', 'video', 'tiktok', 'sticker', 'vv', 'toimg', 'copy',
-          'promote', 'demote', 'kick', 'add', 'tagall', 'group', 'groupinfo',
-          'mute', 'unmute', 'antilink', 'antidelete',
-          'autotyping', 'autorecord', 'autoviewstatus', 'autolikestatus',
-          'autoread', 'autoblue', 'autoreact', 'autobio', 'autosavecontact',
-          'antiban', 'anticall', 'ai', 'gpt', 'image',
-          'addnewsletter', 'listnewsletter',
-          'owner', 'addprem', 'delprem', 'public', 'self', 'ban', 'unban',
-          'kill'
+          'menu', 'ping', 'uptime', 'mode', 'play', 'tiktok', 'promote', 'demote',
+          'kick', 'vv', 'kill', 'setprefix', 'autotyping', 'autorecord', 'swgc',
+          'antilink', 'claude', 'sticker'
         ];
 
         const header = `
@@ -85,12 +84,23 @@ async function handleCase(trashcore, m, { command, args, text, from, isOwner, is
         const commandsText = `╭─「 *COMMAND LIST* 」
 ${cmds.map(c => `│ ${pfx}${c}`).join('\n')}
 ╰───────────────
-> Powered by TEDDY-XMD | Creator: @xdbot1`;
+> Powered by TEDDY-XMD`;
 
         const fullText = applyFont? applyFont(header + commandsText) : header + commandsText;
+
         const MENU_IMAGE_URL = 'https://files.catbox.moe/13nyhx.jpg';
 
-        await trashcore.sendMessage(from, { image: { url: MENU_IMAGE_URL }, caption: fullText }, { quoted: m });
+        const loaderKey = (await trashcore.sendMessage(from, { text: '_Loading menu..._' })).key;
+        await trashcore.sendMessage(from, { delete: loaderKey }).catch(() => {});
+
+        if (menuSettings.mode === 'video' && menuSettings.videoUrl) {
+          await trashcore.sendMessage(from, { video: { url: menuSettings.videoUrl }, gifPlayback: true, caption: fullText }, { quoted: m });
+        } else {
+          const imageSource = (menuSettings.mode === 'image' && menuSettings.imageUrl)
+           ? { url: menuSettings.imageUrl }
+            : { url: MENU_IMAGE_URL };
+          await trashcore.sendMessage(from, { image: imageSource, caption: fullText }, { quoted: m });
+        }
       } catch (err) {
         console.error('Menu Error:', err);
         reply('❌ Failed to load menu.');
@@ -98,6 +108,7 @@ ${cmds.map(c => `│ ${pfx}${c}`).join('\n')}
       break;
     }
 
+    // ================= PING =================
     case 'ping':
     case 'p': {
       const start = Date.now();
@@ -106,6 +117,7 @@ ${cmds.map(c => `│ ${pfx}${c}`).join('\n')}
       break;
     }
 
+    // ================= UPTIME =================
     case 'uptime':
     case 'runtime':
     case 'host': {
@@ -115,19 +127,10 @@ ${cmds.map(c => `│ ${pfx}${c}`).join('\n')}
       break;
     }
 
-    case 'antidelete': {
-      if (!isOwner) return xreply('❌ Owner only.');
-      const opt = (args[0] || '').toLowerCase();
-      if (!['on', 'off'].includes(opt)) return xreply(`Usage: ${prefix}antidelete on/off`);
-      await sessionSet('antidelete', opt === 'on');
-      xreply(`✅ Anti-Delete: ${opt.toUpperCase()}\nDeleted messages will be forwarded to you.`);
-      break;
-    }
-
-    case 'play':
-    case 'song': {
+    // ================= PLAY =================
+    case 'play': {
       try {
-        if (!args.length) return xreply(`🎵 Provide a song name\nExample: ${prefix}play Faded`);
+        if (!args.length) return xreply('🎵 Provide a song name\nExample:.play Faded');
         const query = args.join(' ');
         const { data } = await axios.get(
           `https://api.fvckers.my.id/api/downloader/ytplay?q=${encodeURIComponent(query)}`,
@@ -150,183 +153,37 @@ ${cmds.map(c => `│ ${pfx}${c}`).join('\n')}
           fileName: `${info.title.slice(0, 50)}.mp3`
         }, { quoted: m });
       } catch (err) {
+        console.error('Play Error:', err.message);
         xreply('⚠️ Failed to fetch the song.');
       }
       break;
     }
 
-    case 'video': {
+    // ================= TIKTOK =================
+    case 'tiktok':
+    case 'tt': {
       try {
-        if (!args[0]) return xreply(`⚠️ Provide a video link.\nExample: ${prefix}video https://youtu.be/xxx`);
-        await xreply('⏳ Downloading video...');
-        const { data } = await axios.get(
-          `https://api.fvckers.my.id/api/downloader/ytmp4?url=${encodeURIComponent(args[0])}`,
-          { timeout: 30000 }
-        );
-        if (!data?.success) return xreply('❌ Failed to download video.');
-        await trashcore.sendMessage(from, {
-          video: { url: data.data.download },
-          mimetype: 'video/mp4',
-          caption: data.data.title || 'Video'
-        }, { quoted: m });
-      } catch (err) {
-        xreply('❌ Failed to fetch video.');
-      }
-      break;
-    }
+        if (!args[0]) return xreply('⚠️ Provide a TikTok link.');
+        await xreply('⏳ Fetching TikTok data...');
+        const fg = require('api-dylux');
+        const data = await fg.tiktok(args[0]);
+        const json = data.result;
+        let caption = `🎵 *TikTok Download*\n\nUsername: ${json.author.nickname}\nTitle: ${json.title}\nLikes: ${json.digg_count}`;
 
-    case 'vv': {
-      try {
-        if (!m.message?.extendedTextMessage?.contextInfo?.quotedMessage?.viewOnceMessage)
-          return xreply('⚠️ Reply to a view once message.');
-        const msg = m.message.extendedTextMessage.contextInfo.quotedMessage.viewOnceMessage.message;
-        const type = Object.keys(msg)[0];
-        const stream = await downloadContentFromMessage(msg[type], type.replace('Message', ''));
-        let buffer = Buffer.from([]);
-        for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
-
-        if (type === 'imageMessage') {
-          await trashcore.sendMessage(from, { image: buffer, caption: msg.imageMessage.caption || '' }, { quoted: m });
-        } else if (type === 'videoMessage') {
-          await trashcore.sendMessage(from, { video: buffer, caption: msg.videoMessage.caption || '' }, { quoted: m });
+        if (json.images?.length > 0) {
+          for (const imgUrl of json.images)
+            await trashcore.sendMessage(from, { image: { url: imgUrl } }, { quoted: m });
+        } else {
+          await trashcore.sendMessage(from, { video: { url: json.play }, mimetype: 'video/mp4', caption }, { quoted: m });
         }
       } catch (err) {
-        xreply('❌ Failed to retrieve view once media.');
+        console.error('TikTok Error:', err);
+        await xreply('❌ Failed to fetch TikTok data.');
       }
       break;
     }
 
-    case 'autorecord': {
-      if (!isOwner) return xreply('❌ Owner only.');
-      const opt = (args[0] || '').toLowerCase();
-      if (!['on', 'off'].includes(opt)) return xreply(`Usage: ${prefix}autorecord on/off`);
-      await sessionSet('autoRecord', opt === 'on');
-      xreply(`✅ Auto Recording: ${opt.toUpperCase()}`);
-      break;
-    }
-
-    case 'alwaysonline': {
-      if (!isOwner) return xreply('❌ Owner only.');
-      const opt = (args[0] || '').toLowerCase();
-      if (!['on', 'off'].includes(opt)) return xreply(`Usage: ${prefix}alwaysonline on/off`);
-      await sessionSet('alwaysOnline', opt === 'on');
-      xreply(`✅ Always Online: ${opt.toUpperCase()}`);
-      break;
-    }
-
-    case 'autotyping': {
-      if (!isOwner) return xreply('❌ Owner only.');
-      const opt = (args[0] || '').toLowerCase();
-      if (!['on', 'off'].includes(opt)) return xreply(`Usage: ${prefix}autotyping on/off`);
-      await sessionSet('autoTyping', opt === 'on');
-      xreply(`✅ Auto Typing: ${opt.toUpperCase()}`);
-      break;
-    }
-
-    case 'autolikestatus': {
-      if (!isOwner) return xreply('❌ Owner only.');
-      const opt = (args[0] || '').toLowerCase();
-      if (!['on', 'off'].includes(opt)) return xreply(`Usage: ${prefix}autolikestatus on/off`);
-      await sessionSet('autoLikeStatus', opt === 'on');
-      xreply(`✅ Auto Like Status: ${opt.toUpperCase()}`);
-      break;
-    }
-
-    case 'ai': {
-      if (!args.length) return xreply(`Usage: ${prefix}ai <question>\nExample: ${prefix}ai who is Elon Musk`);
-      try {
-        const { data } = await axios.get(`https://api.nexray.web.id/ai/gpt?query=${encodeURIComponent(args.join(' '))}`);
-        if (!data?.result) return xreply('❌ AI failed to respond.');
-        xreply(data.result);
-      } catch (err) {
-        xreply('❌ AI error.');
-      }
-      break;
-    }
-
-    case 'gpt': {
-      if (!args.length) return xreply(`Usage: ${prefix}gpt <question>`);
-      try {
-        const { data } = await axios.get(`https://api.nexray.web.id/ai/chatgpt?query=${encodeURIComponent(args.join(' '))}`);
-        if (!data?.result) return xreply('❌ GPT failed to respond.');
-        xreply(data.result);
-      } catch (err) {
-        xreply('❌ GPT error.');
-      }
-      break;
-    }
-
-    case 'autoblue':
-    case 'autoread': {
-      if (!isOwner) return xreply('❌ Owner only.');
-      const opt = (args[0] || '').toLowerCase();
-      if (!['on', 'off'].includes(opt)) return xreply(`Usage: ${prefix}autoread on/off`);
-      await sessionSet('autoRead', opt === 'on');
-      xreply(`✅ Auto Read/Blue Ticks: ${opt.toUpperCase()}`);
-      break;
-    }
-
-    case 'autoreact': {
-      if (!isOwner) return xreply('❌ Owner only.');
-      const emoji = args[0];
-      if (!emoji) return xreply(`Usage: ${prefix}autoreact ❤️\nUse 'off' to disable.`);
-      if (emoji === 'off') {
-        await sessionSet('autoReact', false);
-        return xreply('✅ Auto React: OFF');
-      }
-      await sessionSet('autoReact', emoji);
-      xreply(`✅ Auto React: ${emoji}`);
-      break;
-    }
-
-    case 'image': {
-      if (!args.length) return xreply(`Usage: ${prefix}image cute cat in space`);
-      try {
-        const prompt = encodeURIComponent(args.join(' '));
-        const url = `https://api.nexray.web.id/ai/imagine?prompt=${prompt}`;
-        await trashcore.sendMessage(from, { image: { url }, caption: `🎨 Prompt: ${args.join(' ')}` }, { quoted: m });
-      } catch (err) {
-        xreply('❌ Failed to generate image.');
-      }
-      break;
-    }
-
-    case 'antiban': {
-      if (!isOwner) return xreply('❌ Owner only.');
-      const opt = (args[0] || '').toLowerCase();
-      if (!['on', 'off'].includes(opt)) return xreply(`Usage: ${prefix}antiban on/off`);
-      await sessionSet('antiBan', opt === 'on');
-      xreply(`✅ Anti-Ban Mode: ${opt.toUpperCase()}\nReduces spam actions to avoid bans.`);
-      break;
-    }
-
-    case 'autosavecontact': {
-      if (!isOwner) return xreply('❌ Owner only.');
-      const opt = (args[0] || '').toLowerCase();
-      if (!['on', 'off'].includes(opt)) return xreply(`Usage: ${prefix}autosavecontact on/off`);
-      await sessionSet('autoSaveContact', opt === 'on');
-      xreply(`✅ Auto Save Contacts: ${opt.toUpperCase()}`);
-      break;
-    }
-
-    case 'anticall': {
-      if (!isOwner) return xreply('❌ Owner only.');
-      const opt = (args[0] || '').toLowerCase();
-      if (!['on', 'off'].includes(opt)) return xreply(`Usage: ${prefix}anticall on/off`);
-      await sessionSet('antiCall', opt === 'on');
-      xreply(`✅ Anti-Call: ${opt.toUpperCase()}\nIncoming calls will be auto-rejected.`);
-      break;
-    }
-
-    case 'autobio': {
-      if (!isOwner) return xreply('❌ Owner only.');
-      const opt = (args[0] || '').toLowerCase();
-      if (!['on', 'off'].includes(opt)) return xreply(`Usage: ${prefix}autobio on/off`);
-      await sessionSet('autoBio', opt === 'on');
-      xreply(`✅ Auto Bio: ${opt.toUpperCase()}`);
-      break;
-    }
-
+    // ================= PROMOTE =================
     case 'promote': {
       try {
         if (!from.endsWith('@g.us')) return xreply('⚠️ Group only.');
@@ -337,11 +194,13 @@ ${cmds.map(c => `│ ${pfx}${c}`).join('\n')}
         await trashcore.groupParticipantsUpdate(from, [target], 'promote');
         await xreply(`✅ Promoted @${target.split('@')[0]}`);
       } catch (err) {
+        console.error('Promote Error:', err);
         return xreply('❌ Failed to promote member.');
       }
       break;
     }
 
+    // ================= DEMOTE =================
     case 'demote': {
       try {
         if (!from.endsWith('@g.us')) return xreply('⚠️ Group only.');
@@ -352,11 +211,13 @@ ${cmds.map(c => `│ ${pfx}${c}`).join('\n')}
         await trashcore.groupParticipantsUpdate(from, [target], 'demote');
         await xreply(`✅ Demoted @${target.split('@')[0]}`);
       } catch (err) {
+        console.error('Demote Error:', err);
         return xreply('❌ Failed to demote member.');
       }
       break;
     }
 
+    // ================= KICK =================
     case 'kick': {
       try {
         if (!from.endsWith('@g.us')) return xreply('⚠️ Group only.');
@@ -367,47 +228,160 @@ ${cmds.map(c => `│ ${pfx}${c}`).join('\n')}
         await trashcore.groupParticipantsUpdate(from, [target], 'remove');
         return xreply(`👢 Removed @${target.split('@')[0]}`);
       } catch (err) {
+        console.error('Kick Error:', err);
         return xreply('❌ Failed to kick member.');
       }
       break;
     }
 
+    // ================= VV =================
+    case 'vv':
+    case 'viewonce': {
+      try {
+        if (!m.quoted) return xreply('⚠️ Reply to a view once message!');
+        const viewOnceMsg = m.quoted.message?.viewOnceMessage?.message || m.quoted.message;
+        const imageMsg = viewOnceMsg?.imageMessage;
+        const videoMsg = viewOnceMsg?.videoMessage;
+        if (!imageMsg &&!videoMsg) return xreply('⚠️ Not a view once message!');
+        const type = imageMsg? 'image' : 'video';
+        const stream = await downloadContentFromMessage(imageMsg || videoMsg, type);
+        let buffer = Buffer.from([]);
+        for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
+        await trashcore.sendMessage(from,
+          type === 'image'
+           ? { image: buffer, caption: '*Retrieved by TEDDY-XMD*' }
+            : { video: buffer, caption: '*Retrieved by TEDDY-XMD*' },
+          { quoted: m }
+        );
+      } catch (err) {
+        console.error('VV Error:', err);
+        xreply('❌ Failed to retrieve view-once media.');
+      }
+      break;
+    }
+
+    // ================= KILL =================
+    case 'kill': {
+      try {
+        if (!from.endsWith('@g.us')) return xreply('⚠️ Group only.');
+        if (!isOwner) return xreply('❌ Owner only.');
+        const members = metadata.participants
+         .filter(p => p.id!== trashcore.user.id)
+         .map(p => p.id);
+        xreply('💀 Initializing Kill command... All members will be removed.');
+        await trashcore.groupUpdateSubject(from, 'TEDDY-XMD');
+        await trashcore.groupUpdateDescription(from, 'This group is managed by TEDDY-XMD');
+        setTimeout(async () => {
+          await trashcore.sendMessage(from, {
+            text: `⚠️ Removing ${members.length} member(s) now. Goodbye everyone 👋`
+          }, { quoted: m });
+          await trashcore.groupParticipantsUpdate(from, members, 'remove');
+          setTimeout(() => trashcore.groupLeave(from), 1500);
+        }, 1500);
+      } catch (err) {
+        console.error('Kill Error:', err);
+        reply('❌ Failed to execute kill command.');
+      }
+      break;
+    }
+
+    // ================= MODE =================
+    case 'mode': {
+      if (!isOwner) return xreply('❌ Owner only.');
+      if (!args[0] ||!['private', 'public'].includes(args[0]))
+        return xreply('Usage:.mode private/public');
+      const newMode = args[0] === 'private';
+      await sessionSet('privateMode', newMode);
+      xreply(`✅ Mode: ${newMode? 'PRIVATE' : 'PUBLIC'}`);
+      break;
+    }
+
+    // ================= SETPREFIX =================
+    case 'setprefix': {
+      if (!isOwner) return xreply('❌ Owner only.');
+      if (!args[0]) return xreply('Usage:.setprefix <prefix>');
+      sessionSet('prefix', args[0]);
+      await xreply(`✅ Prefix set to: ${args[0]}`);
+      break;
+    }
+
+    // ================= AUTOTYPING =================
+    case 'autotyping': {
+      if (!isOwner) return xreply('❌ Owner only.');
+      if (!args[0] ||!['on', 'off'].includes(args[0])) return xreply('Usage:.autotyping on/off');
+      const val = args[0] === 'on';
+      await sessionSet('autoTyping', val);
+      xreply(`✅ Auto Typing is now: ${val? 'ON' : 'OFF'}`);
+      break;
+    }
+
+    // ================= AUTORECORD =================
+    case 'autorecord': {
+      if (!isOwner) return xreply('❌ Owner only.');
+      if (!args[0] ||!['on', 'off'].includes(args[0])) return xreply('Usage:.autorecord on/off');
+      const val = args[0] === 'on';
+      await sessionSet('autoRecord', val);
+      xreply(`✅ Auto Record is now: ${val? 'ON' : 'OFF'}`);
+      break;
+    }
+
+    // ================= ANTILINK =================
     case 'antilink': {
       try {
         if (!from.endsWith('@g.us')) return xreply('⚠️ Group only.');
         if (!isOwner &&!isAdmin) return xreply('❌ Admins only.');
-        if (!args[0] ||!['on', 'off'].includes(args[0])) return xreply(`Usage: ${prefix}antilink on/off`);
+        if (!args[0] ||!['on', 'off'].includes(args[0])) return xreply('Usage:.antilink on/off');
         const val = args[0] === 'on';
         await sessionSet(`antilink_${from}`, val);
-        xreply(`✅ Anti-Link: ${val? 'ON' : 'OFF'}\nLinks will be deleted.`);
+        xreply(`✅ Anti-Link is now: ${val? 'ON' : 'OFF'}`);
       } catch (err) {
+        console.error('Antilink Error:', err);
         reply('❌ Failed to toggle antilink.');
       }
       break;
     }
 
-    case 'addnewsletter': {
-      if (!isOwner) return xreply('❌ Owner only.');
-      if (!args[0]) return xreply(`Usage: ${prefix}addnewsletter 120363xxxx@newsletter`);
-      const jid = args[0];
-      let list = sessionGet('newsletters', []);
-      if (!list.includes(jid)) list.push(jid);
-      await sessionSet('newsletters', list);
-      xreply(`✅ Added ${jid} to auto-follow list.`);
+    // ================= CLAUDE =================
+    case 'claude':
+    case 'claudeai': {
+      try {
+        const query = args.join(' ');
+        if (!query) return xreply('Usage:.claude <message>');
+        await xreply('🤖 Asking Claude...');
+        const { data } = await axios.get(`${NEXRAY_API}/ai/claude?text=${encodeURIComponent(query)}`);
+        reply(data.status? `💬 Claude:\n\n${data.result}` : '❌ Failed to get response');
+      } catch (err) {
+        console.error('Claude Error:', err);
+        xreply('❌ Error contacting Claude AI');
+      }
       break;
     }
 
-    case 'listnewsletter': {
-      let list = sessionGet('newsletters', []);
-      if (!list.length) return xreply('No newsletters added.');
-      xreply(`📋 *Auto-Follow Newsletters*\n\n${list.map(j => `• ${j}`).join('\n')}`);
-      break;
-    }
+    // ================= STICKER =================
+    case 'sticker':
+    case 's': {
+      try {
+        const quotedMsg = m.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+        const msg = quotedMsg?.imageMessage || quotedMsg?.videoMessage || m.message?.imageMessage || m.message?.videoMessage;
+        if (!msg) return xreply('⚠️ Reply to an image or video.');
+        if (msg.videoMessage?.seconds > 30) return xreply('⚠️ Max 30s for video stickers.');
 
-    case 'kill': {
-      if (!isOwner) return xreply('❌ Owner only.');
-      xreply('🛑 Shutting down...');
-      process.exit(0);
+        await xreply('🪄 Creating sticker...');
+        const stream = await downloadContentFromMessage(msg, msg.mimetype.split('/')[0]);
+        let buffer = Buffer.from([]);
+        for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
+
+        const opts = { packname: config.PACK_NAME || 'TEDDY-XMD', author: config.AUTHOR || 'Bot' };
+        let webpPath;
+        if (/image/.test(msg.mimetype)) webpPath = await writeExifImg(buffer, opts);
+        else webpPath = await writeExifVid(buffer, opts);
+
+        await trashcore.sendMessage(from, { sticker: fs.readFileSync(webpPath) }, { quoted: m });
+        fs.unlinkSync(webpPath);
+      } catch (err) {
+        console.error('Sticker Error:', err);
+        await xreply(`💥 Failed to create sticker:\n${err.message}`);
+      }
       break;
     }
 
