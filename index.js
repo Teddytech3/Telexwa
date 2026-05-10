@@ -75,10 +75,16 @@ app.post('/api/pair', async (req, res) => {
       version,
       auth: state,
       logger: pino({ level: 'silent' }),
-      printQRInTerminal: false
+      printQRInTerminal: false,
+      connectTimeoutMs: 20000
     });
 
     let replied = false;
+
+    // Prevent unhandled error crash
+    tempSock.ev.on('error', (err) => {
+      console.error(`[Pair Socket Error ${cleanNum}]:`, err.message);
+    });
 
     tempSock.ev.on('connection.update', async ({ pairingCode, connection, lastDisconnect }) => {
       if (pairingCode &&!replied) {
@@ -92,19 +98,34 @@ app.post('/api/pair', async (req, res) => {
         const reason = lastDisconnect?.error?.message || 'Connection closed by WhatsApp';
         console.error(`[Pair Error ${cleanNum}]:`, reason);
         if (!res.headersSent) res.status(500).json({ error: reason });
+        tempSock?.end();
       }
     });
 
-    await tempSock.requestPairingCode(cleanNum);
+    // Wait for socket to stabilize before requesting code
+    setTimeout(async () => {
+      try {
+        if (!replied && tempSock.user === undefined) {
+          await tempSock.requestPairingCode(cleanNum);
+        }
+      } catch (err) {
+        if (!replied) {
+          replied = true;
+          console.error(`[Pair Request Error ${cleanNum}]:`, err.message);
+          if (!res.headersSent) res.status(500).json({ error: err.message });
+          tempSock?.end();
+        }
+      }
+    }, 2000);
 
     setTimeout(() => {
       if (!replied) {
         replied = true;
         console.error(`[Pair Timeout ${cleanNum}]`);
-        if (!res.headersSent) res.status(500).json({ error: 'Timeout: WhatsApp did not return a code. Try again in 30s' });
+        if (!res.headersSent) res.status(500).json({ error: 'Timeout: WhatsApp did not return a code' });
         tempSock?.end();
       }
-    }, 20000);
+    }, 25000);
 
   } catch (err) {
     console.error('[Pair Fatal Error]:', err);
