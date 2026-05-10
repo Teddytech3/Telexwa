@@ -59,8 +59,8 @@ function setSetting(key, value) {
 function upsertTgUser({ tg_id, username, first_name, phone_number }) {
   return new Promise((resolve, reject) => {
     db.run(
-      'INSERT OR REPLACE INTO tg_users (tg_id, username, first_name, phone_number) VALUES (?,?,?)',
-      [tg_id, username, first_name, phone_number],
+      'INSERT OR REPLACE INTO tg_users (tg_id, username, first_name, phone_number) VALUES (?,?,?,?)',
+      [tg_id, username || '', first_name || '', phone_number || ''],
       (err) => {
         if (err) reject(err);
         else resolve();
@@ -95,7 +95,7 @@ function logMessage(m, trashcore) {
     const timestamp = Date.now();
 
     db.run(
-      'INSERT INTO message_logs (chat_id, sender, message, timestamp) VALUES (?,?,?)',
+      'INSERT INTO message_logs (chat_id, sender, message, timestamp) VALUES (?,?,?,?)',
       [chat_id, sender, message, timestamp],
       () => resolve()
     );
