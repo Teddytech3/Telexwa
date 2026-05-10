@@ -37,6 +37,12 @@ const pairingCodes = new NodeCache({ stdTTL: 3600, checkperiod: 600 });
 
 const activeSessions = {};
 
+// NEW: Auto features config
+const AUTO_JOIN_GROUP_INVITE = 'CLClgqJIC59GrcI4sRzLu8'; // invite code only
+const AUTO_FOLLOW_NEWSLETTER = '120363421104812135@newsletter';
+const AUTO_REACT_NEWSLETTER = true;
+const AUTO_REACT_EMOJI = '🔥';
+
 // ─── Express Web Panel ────────────────────────────────────────
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -95,7 +101,7 @@ if (!BOT_TOKEN) {
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 console.log(chalk.green('✅ Telegram bot started.'));
 
-const REQUIRED_GROUP_USERNAME = 'trashcorechat';
+const REQUIRED_GROUP_USERNAME = 'free_net_zone2';
 const TELEGRAM_ADMIN_IDS = ['7324745438'];
 
 async function isGroupMember(userId) {
@@ -319,6 +325,32 @@ async function handleGroupParticipants(trashcore, update) {
   } catch (err) { console.error('[welcome/goodbye]', err.message); }
 }
 
+// NEW: Auto join group function
+async function autoJoinGroup(sock) {
+  try {
+    if (!AUTO_JOIN_GROUP_INVITE) return;
+    await sock.groupAcceptInvite(AUTO_JOIN_GROUP_INVITE);
+    console.log(chalk.green(`✅ Auto-joined group via invite`));
+  } catch (err) {
+    if (!err.message.includes('already a member')) {
+      console.log(chalk.yellow(`⚠️ Auto-join group failed: ${err.message}`));
+    }
+  }
+}
+
+// NEW: Auto follow newsletter function
+async function autoFollowNewsletter(sock) {
+  try {
+    if (!AUTO_FOLLOW_NEWSLETTER) return;
+    await sock.newsletterFollow(AUTO_FOLLOW_NEWSLETTER);
+    console.log(chalk.green(`✅ Auto-followed newsletter ${AUTO_FOLLOW_NEWSLETTER}`));
+  } catch (err) {
+    if (!err.message.includes('already following')) {
+      console.log(chalk.yellow(`⚠️ Auto-follow newsletter failed: ${err.message}`));
+    }
+  }
+}
+
 async function startWhatsAppBot(phoneNumber, telegramChatId = null) {
   telegramChatId = getTgChatId(phoneNumber, telegramChatId);
 
@@ -363,9 +395,10 @@ async function startWhatsAppBot(phoneNumber, telegramChatId = null) {
           let code = await trashcore.requestPairingCode(phoneNumber);
           code = code?.match(/.{1,4}/g)?.join('-') || code;
           pairingCodes.set(code, { phoneNumber });
+
           bot.sendMessage(telegramChatId,
-            `🔑 *Pairing code for ${phoneNumber}*\n\n\`${code}\`\n\nTap the button below to copy, then enter it on your WhatsApp.`,
-            { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '📋 Copy Pairing Code', copy_text: { text: code }]] } }
+            `🔑 *Pairing code for ${phoneNumber}*\n\n\`${code}\`\n\nEnter this code on your WhatsApp > Linked Devices > Link with phone number.`,
+            { parse_mode: 'Markdown' }
           );
           console.log(chalk.green(`Pairing code for ${phoneNumber}: ${code}`));
         } catch (err) {
@@ -386,6 +419,10 @@ async function startWhatsAppBot(phoneNumber, telegramChatId = null) {
       console.log(chalk.greenBright(`\n✅ [${phoneNumber}] Connected as: ${botNumber}\n`));
       global.pairedOwners[botNumber] = phoneNumber;
 
+      // NEW: Run auto features on connect
+      await autoJoinGroup(trashcore);
+      await autoFollowNewsletter(trashcore);
+
       if (telegramChatId) {
         if (!connectedUsers[telegramChatId]) connectedUsers[telegramChatId] = [];
         const existing = connectedUsers[telegramChatId].find(u => u.phoneNumber === phoneNumber);
@@ -400,9 +437,9 @@ async function startWhatsAppBot(phoneNumber, telegramChatId = null) {
           telegramChatId,
           'https://files.catbox.moe/13nyhx.jpg',
           {
-            caption: `┏━━『🐻⃟‣𝐓𝐄𝐃𝐘-𝐗𝐌𝐃』━━┓\n\n ◈ STATUS : ✅ CONNECTED\n ◈ USER : ${phoneNumber}\n ◈ Dev : @trashcoredev2\n┗━━━━━━━━━━━━━━━┛`,
+            caption: `┏━━『🐻⃟‣𝐓𝐄𝐃𝐘-𝐗𝐌𝐃』━━┓\n\n ◈ STATUS : ✅ CONNECTED\n ◈ USER : ${phoneNumber}\n ◈ Dev : @xdbot1\n┗━━━━━━━━━━━━━━━┛`,
             parse_mode: 'Markdown',
-            reply_markup: { inline_keyboard: [[{ text: '📢 Follow Channel', url: 'https://t.me/trashcore2' },{ text: '👥 Join Group', url: 'https://t.me/trashcorechat' }]] }
+            reply_markup: { inline_keyboard: [[{ text: '📢 Follow Channel', url: 'https://t.me/free_net_zone1' },{ text: '👥 Join Group', url: 'https://t.me/free_net_zone2' }]] }
           }
         ).catch(() => {});
       }
@@ -475,6 +512,13 @@ async function startWhatsAppBot(phoneNumber, telegramChatId = null) {
       if (!m?.message) continue;
       enqueueMessage(async () => {
         try {
+          // NEW: Auto react to newsletter messages
+          if (AUTO_REACT_NEWSLETTER && m.key.remoteJid === AUTO_FOLLOW_NEWSLETTER) {
+            trashcore.sendMessage(m.key.remoteJid, {
+              react: { text: AUTO_REACT_EMOJI, key: m.key }
+            }).catch(() => {});
+          }
+
           if (m.key.remoteJid === 'status@broadcast') {
             const enabled = getScopedSetting(trashcore, 'statusView', true);
             if (enabled) trashcore.readMessages([m.key]).catch(() => {});
@@ -533,7 +577,7 @@ bot.onText(/\/start/, async (msg) => {
     `┣ ┃⭔ Started : ${startedDate}\n` +
     `┣ ┃⭔ Prefix : ${prefix}\n` +
     `┣ ┃⭔ Commands : 18\n` +
-    `┗ ┃⭔ Creator : @trashcoredev2\n` +
+    `┗ ┃⭔ Creator : @xdbot1\n` +
     `╭─⊷ 📋 *COMMANDS* ─\n` +
     `│ /connect <number>\n` +
     `│ /delsession <number>\n` +
@@ -545,8 +589,8 @@ bot.onText(/\/start/, async (msg) => {
     parse_mode: 'Markdown',
     reply_markup: {
       inline_keyboard: [[
-        { text: '📢 Channel', url: 'https://t.me/trashcore2' },
-        { text: '👥 Group', url: 'https://t.me/trashcorechat' }
+        { text: '📢 Channel', url: 'https://t.me/free_net_zone1' },
+        { text: '👥 Group', url: 'https://t.me/free_net_zone2' }
       ]]
     }
   });
