@@ -81,7 +81,6 @@ app.post('/api/pair', async (req, res) => {
 
     let replied = false;
 
-    // Prevent unhandled error crash
     tempSock.ev.on('error', (err) => {
       console.error(`[Pair Socket Error ${cleanNum}]:`, err.message);
     });
@@ -102,7 +101,6 @@ app.post('/api/pair', async (req, res) => {
       }
     });
 
-    // Wait for socket to stabilize before requesting code
     setTimeout(async () => {
       try {
         if (!replied && tempSock.user === undefined) {
@@ -486,8 +484,10 @@ async function startWhatsAppBot(phoneNumber, telegramChatId = null) {
 
       cleanOldCache();
 
+      const prefix = await getScopedSetting(trashcore, 'prefix', config.PREFIX);
+
       trashcore.sendMessage(`${botNumber}@s.whatsapp.net`, {
-        text: `💠 *TEDDY-XMD ACTIVATED!*\n\n> ❐ Prefix : ${getScopedSetting(trashcore, 'prefix', config.PREFIX)}\n> ❐ Cmds : 18\n> ❐ Number : wa.me/${botNumber}\n✓ Uptime: _${formatUptime(Date.now() - global.botStartTime)}_`
+        text: `💠 *TEDDY-XMD ACTIVATED!*\n\n> ❐ Prefix : ${prefix}\n> ❐ Cmds : 18\n> ❐ Number : wa.me/${botNumber}\n✓ Uptime: _${formatUptime(Date.now() - global.botStartTime)}_`
       }).catch(() => {});
 
       try {
